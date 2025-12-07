@@ -239,197 +239,141 @@ class TranscriptService {
             wordsAssigned = wordEndIndex
         }
         
-        // Now assign words to sentences using hybrid approach: time-based with text validation
-        // CRITICAL: Track which word indices have been assigned to prevent duplicates
+        // Now assign words to sentences using a strict sequential, non-overlapping strategy
+        // Once a word is assigned, it is never reused by another sentence
         var assignedWordIndices: Set<Int> = []
+        var wordCursor = 0
+        let lookahead = 10
         
         for (sentenceIndex, sentenceText) in sentenceTexts.enumerated() {
             var sentenceWordIndices: [Int] = []
-            var sentenceStartTime: Double = Double.infinity
-            var sentenceEndTime: Double = 0
-            
-            let timeRange = sentenceTimeRanges[sentenceIndex]
             let expectedWordCount = sentenceWordCounts[sentenceIndex]
             
-            // Strategy 1: Assign words based on time range (primary method)
-            // BUT: Filter out words that are already assigned to previous sentences
-            var candidateIndices: [Int] = []
-            for (wordIndex, word) in words.enumerated() {
-                // Skip words already assigned to another sentence
-                if assignedWordIndices.contains(wordIndex) {
-                    continue
-                }
-                
-                // Word belongs to this sentence if its timing overlaps with sentence time range
-                // Use generous overlap: word starts before sentence ends OR word ends after sentence starts
-                if word.start < timeRange.end + 0.5 && word.end > timeRange.start - 0.5 {
-                    candidateIndices.append(wordIndex)
-                }
-            }
-            
-            // Strategy 2: If we have too few candidates, use sequential assignment
-            if candidateIndices.count < Int(Double(expectedWordCount) * 0.5) {
-                // Fall back to sequential assignment based on word position
-                let startIdx = timeRange.wordStartIndex
-                let endIdx = min(timeRange.wordEndIndex, words.count)
-                candidateIndices = Array(startIdx..<endIdx)
-            }
-            
-            // Strategy 3: Try to match by text for better accuracy (optional validation)
-            let sentenceWords = sentenceText.components(separatedBy: .whitespaces)
+            let sentenceWords = sentenceText
+                .components(separatedBy: .whitespaces)
                 .filter { !$0.isEmpty }
+                .map { normalizeWord($0) }
             
-            // If we have candidates, try to refine the match using text
-            if !candidateIndices.isEmpty && candidateIndices.count <= expectedWordCount * 2 {
-                var matchedIndices: [Int] = []
-                var searchStart = candidateIndices.first ?? currentWordIndex
+            for sentenceWord in sentenceWords {
+                guard !sentenceWord.isEmpty else { continue }
                 
-                for sentenceWord in sentenceWords {
-                    let normalizedSentenceWord = normalizeWord(sentenceWord)
-                    guard !normalizedSentenceWord.isEmpty else { continue }
+                // Search in a small lookahead window for the best match
+                var bestMatch: Int? = nil
+                var bestScore: Double = 0
+                let searchEnd = min(wordCursor + lookahead, words.count)
+                
+                for i in wordCursor..<searchEnd {
+                    if assignedWordIndices.contains(i) { continue }
+                    let timingWord = normalizeWord(words[i].text)
                     
-                    // Search in candidate range with wider window
-                    let searchEnd = min(searchStart + 15, words.count)
-                    var bestMatch: (index: Int, score: Double)? = nil
-                    
-                    for i in searchStart..<searchEnd {
-                        // Skip words already assigned to another sentence
-                        if assignedWordIndices.contains(i) {
-                            continue
-                        }
-                        
-                        // Only consider words in candidate list
-                        if !candidateIndices.contains(i) && candidateIndices.count > expectedWordCount {
-                            continue
-                        }
-                        
-                        let timingWord = words[i]
-                        let normalizedTimingWord = normalizeWord(timingWord.text)
-                        
-                        // Calculate match score
-                        var score = 0.0
-                        
-                        // Exact match = highest score
-                        if normalizedSentenceWord == normalizedTimingWord {
-                            score = 100.0
-                        }
-                        // Contains match = medium score
-                        else if normalizedSentenceWord.contains(normalizedTimingWord) || 
-                                normalizedTimingWord.contains(normalizedSentenceWord) {
-                            score = 50.0
-                        }
-                        // Similar length = low score
-                        else if abs(normalizedSentenceWord.count - normalizedTimingWord.count) <= 2 {
-                            let commonChars = Set(normalizedSentenceWord).intersection(Set(normalizedTimingWord)).count
-                            score = Double(commonChars) / Double(max(normalizedSentenceWord.count, normalizedTimingWord.count)) * 30.0
-                        }
-                        
-                        // Prefer words closer to expected position
-                        let positionBonus = max(0, 10.0 - Double(i - searchStart))
-                        score += positionBonus
-                        
-                        if score > 0 && (bestMatch == nil || score > bestMatch!.score) {
-                            bestMatch = (i, score)
-                        }
+                    var score = 0.0
+                    if timingWord == sentenceWord {
+                        score = 100.0
+                    } else if sentenceWord.contains(timingWord) || timingWord.contains(sentenceWord) {
+                        score = 50.0
+                    } else if abs(sentenceWord.count - timingWord.count) <= 2 {
+                        let commonChars = Set(sentenceWord).intersection(Set(timingWord)).count
+                        score = Double(commonChars) / Double(max(sentenceWord.count, timingWord.count)) * 30.0
                     }
                     
-                    // Use best match if score is reasonable, otherwise use sequential
-                    if let match = bestMatch, match.score >= 20.0 {
-                        matchedIndices.append(match.index)
-                        searchStart = match.index + 1
-                    } else {
-                        // Use sequential assignment if no good match
-                        // But skip words already assigned
-                        while searchStart < words.count {
-                            if !assignedWordIndices.contains(searchStart) && !matchedIndices.contains(searchStart) {
-                                matchedIndices.append(searchStart)
-                                searchStart += 1
-                                break
-                            }
-                            searchStart += 1
-                        }
+                    // Position bonus (closer to cursor is better)
+                    let positionBonus = max(0, 10 - (i - wordCursor))
+                    score += Double(positionBonus)
+                    
+                    if score > bestScore {
+                        bestScore = score
+                        bestMatch = i
                     }
                 }
                 
-                sentenceWordIndices = matchedIndices.isEmpty ? candidateIndices : matchedIndices
-            } else {
-                // Too many candidates or no candidates - use sequential assignment
-                // But filter out already-assigned words
-                if candidateIndices.isEmpty {
-                    let sequentialRange = Array(timeRange.wordStartIndex..<min(timeRange.wordEndIndex, words.count))
-                    sentenceWordIndices = sequentialRange.filter { !assignedWordIndices.contains($0) }
+                if let match = bestMatch, bestScore >= 20.0 {
+                    sentenceWordIndices.append(match)
+                    assignedWordIndices.insert(match)
+                    wordCursor = match + 1
                 } else {
-                    sentenceWordIndices = candidateIndices
-                        .filter { !assignedWordIndices.contains($0) }
-                        .prefix(expectedWordCount * 2)
-                        .sorted()
+                    // Fallback: take the next unassigned word at cursor if available
+                    while wordCursor < words.count && assignedWordIndices.contains(wordCursor) {
+                        wordCursor += 1
+                    }
+                    if wordCursor < words.count {
+                        sentenceWordIndices.append(wordCursor)
+                        assignedWordIndices.insert(wordCursor)
+                        wordCursor += 1
+                    }
                 }
             }
             
-            // Remove duplicates and sort
-            sentenceWordIndices = Array(Set(sentenceWordIndices)).sorted()
+            // If still short, fill sequentially without overlap up to expectedWordCount
+            while sentenceWordIndices.count < expectedWordCount && wordCursor < words.count {
+                if !assignedWordIndices.contains(wordCursor) {
+                    sentenceWordIndices.append(wordCursor)
+                    assignedWordIndices.insert(wordCursor)
+                }
+                wordCursor += 1
+            }
             
-            // CRITICAL: Mark these words as assigned so they can't be assigned to other sentences
-            for wordIndex in sentenceWordIndices {
-                assignedWordIndices.insert(wordIndex)
+            // Trim any overshoot to avoid excessive assignments
+            if sentenceWordIndices.count > expectedWordCount + 5 {
+                sentenceWordIndices = Array(sentenceWordIndices.prefix(expectedWordCount + 5))
             }
             
             // Calculate sentence timing from assigned words
-            if !sentenceWordIndices.isEmpty {
-                sentenceStartTime = words[sentenceWordIndices.first!].start
-                sentenceEndTime = words[sentenceWordIndices.last!].end
+            let sentenceStartTime: Double
+            let sentenceEndTime: Double
+            if let firstIdx = sentenceWordIndices.first, let lastIdx = sentenceWordIndices.last {
+                sentenceStartTime = words[firstIdx].start
+                sentenceEndTime = words[lastIdx].end
             } else {
+                // Fallback to time range estimate
+                let timeRange = sentenceTimeRanges[sentenceIndex]
                 sentenceStartTime = timeRange.start
                 sentenceEndTime = timeRange.end
             }
             
-            // Update currentWordIndex for next sentence
-            if !sentenceWordIndices.isEmpty {
-                currentWordIndex = max(currentWordIndex, sentenceWordIndices.last! + 1)
-            }
-            
-            // Create sentence with matched word indices
             sentences.append(TranscriptData.Sentence(
                 text: sentenceText,
-                wordIndices: sentenceWordIndices,
+                wordIndices: Array(Set(sentenceWordIndices)).sorted(),
                 startTime: sentenceStartTime,
                 endTime: sentenceEndTime
             ))
         }
         
-        // Handle any remaining timing words (assign to last sentence)
-        if currentWordIndex < words.count {
-            let remainingWords = words.count - currentWordIndex
-            if remainingWords > 0 {
-                print("📊 TranscriptService: \(remainingWords) timing words remaining, assigning to last sentence")
-                
-                // Add remaining words to last sentence
-                // But only add words that haven't been assigned yet
-                if let lastSentence = sentences.last {
-                    var updatedIndices = lastSentence.wordIndices
-                    var lastEndTime = lastSentence.endTime
-                    
-                    for i in 0..<remainingWords {
-                        let wordIndex = currentWordIndex + i
-                        // Only add if not already assigned to this or another sentence
-                        if !assignedWordIndices.contains(wordIndex) && !updatedIndices.contains(wordIndex) {
-                            updatedIndices.append(wordIndex)
-                            assignedWordIndices.insert(wordIndex) // Mark as assigned
-                        }
-                        // Update end time even if word was already assigned (for timing accuracy)
-                        if wordIndex < words.count {
-                            lastEndTime = max(lastEndTime, words[wordIndex].end)
-                        }
-                    }
-                    
-                    sentences[sentences.count - 1] = TranscriptData.Sentence(
-                        text: lastSentence.text,
-                        wordIndices: updatedIndices.sorted(),
-                        startTime: lastSentence.startTime,
-                        endTime: lastEndTime
-                    )
+        // If any words remain unassigned, append them to the last sentence (without duplicates)
+        if wordCursor < words.count, var last = sentences.last {
+            var updated = last.wordIndices
+            for idx in wordCursor..<words.count where !assignedWordIndices.contains(idx) {
+                updated.append(idx)
+                assignedWordIndices.insert(idx)
+            }
+            if let firstIdx = updated.first, let lastIdx = updated.last {
+                last = TranscriptData.Sentence(
+                    text: last.text,
+                    wordIndices: Array(Set(updated)).sorted(),
+                    startTime: words[firstIdx].start,
+                    endTime: words[lastIdx].end
+                )
+                sentences[sentences.count - 1] = last
+            }
+        }
+        
+        // Diagnostics: detect duplicates/missing coverage
+        var wordToSentence: [Int: Int] = [:]
+        var duplicates: [Int: [Int]] = [:]
+        for (sIdx, sentence) in sentences.enumerated() {
+            for wIdx in sentence.wordIndices {
+                if let existing = wordToSentence[wIdx] {
+                    duplicates[wIdx, default: []].append(contentsOf: [existing, sIdx])
+                } else {
+                    wordToSentence[wIdx] = sIdx
                 }
             }
+        }
+        let missing = (0..<words.count).filter { wordToSentence[$0] == nil }
+        if !duplicates.isEmpty {
+            print("⚠️ TranscriptService: word→sentence duplicates (showing first 10): \(duplicates.prefix(10))")
+        }
+        if !missing.isEmpty {
+            print("⚠️ TranscriptService: missing word assignments (showing first 20): \(missing.prefix(20)), total \(missing.count)")
         }
         
         let matchedWords = sentences.reduce(0) { $0 + $1.wordIndices.count }

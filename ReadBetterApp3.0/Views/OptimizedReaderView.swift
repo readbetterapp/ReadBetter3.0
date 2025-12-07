@@ -152,7 +152,7 @@ struct OptimizedReaderView: View {
         case playing        // Normal playback auto-scroll
         case scrubbing      // User is scrubbing (disable auto-scroll)
         case paused         // Paused (centered scroll allowed)
-        case scrubbingEnded // Just finished scrubbing (disable for 1 second)
+        case scrubbingEnded // Just finished scrubbing
     }
     
     enum ScrollPriority: Int {
@@ -324,7 +324,7 @@ struct OptimizedReaderView: View {
                                                 requestScroll(
                                                     sentenceIndex: index,
                                                     priority: .high,
-                                                    anchor: .top,
+                                                    anchor: nil,
                                                     animated: true,
                                                     reason: "Tapped sentence \(index)",
                                                     proxy: proxy
@@ -382,7 +382,7 @@ struct OptimizedReaderView: View {
                                 requestScroll(
                                     sentenceIndex: sentenceIndex,
                                     priority: .high,
-                                    anchor: .top,
+                                    anchor: nil,
                                     animated: true,
                                     reason: "Scroll closure called",
                                     proxy: proxy
@@ -434,6 +434,11 @@ struct OptimizedReaderView: View {
                                 return
                             }
                             
+                            // Skip if this word was not mapped to any sentence (defensive)
+                            guard wordToSentenceMap[wordIndex] != nil else {
+                                return
+                            }
+                            
                             // Trigger haptic feedback when word changes during normal playback
                             if wordIndex != lastHapticWordIndex {
                                 hapticGenerator?.impactOccurred(intensity: 0.7)
@@ -474,13 +479,9 @@ struct OptimizedReaderView: View {
                             } else {
                                 // Scrubbing ended - update mode and reset haptic tracking
                                 scrollMode = .scrubbingEnded
-                                disableAutoScrollUntil = Date().addingTimeInterval(1.0)
                                 lastHapticWordIndex = nil
-                                
-                                // Reset to playing mode after disable period
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                                    scrollMode = .playing
-                                }
+                                // Allow immediate scroll after scrubbing ends
+                                scrollMode = .playing
                             }
                         }
                     }
@@ -971,10 +972,11 @@ struct OptimizedReaderView: View {
                                                         requestScroll(
                                                             sentenceIndex: sentenceIndex,
                                                             priority: .high,
-                                                            anchor: .top,  // Always top after scrubbing
+                                                            anchor: nil,  // Center-first with fallback
                                                             animated: false,  // Instant scroll
                                                             reason: "Scrubbing ended at \(String(format: "%.2f", actualTime))s",
-                                                            proxy: scrollProxy
+                                                            proxy: scrollProxy,
+                                                            allowDuringScrubbingEnded: true
                                                         )
                                                     }
                                                     
@@ -1031,7 +1033,7 @@ struct OptimizedReaderView: View {
                                     requestScroll(
                                         sentenceIndex: sentenceIndex,
                                         priority: .high,
-                                        anchor: .top,
+                                    anchor: nil,
                                         animated: true,
                                         reason: "Rewind 10s",
                                         proxy: proxy
@@ -1091,11 +1093,10 @@ struct OptimizedReaderView: View {
                                     
                                     if let sentenceIndex = findSentenceAtTime(currentTime),
                                        let proxy = scrollProxy {
-                                        // Request centered scroll when paused
                                         requestScroll(
                                             sentenceIndex: sentenceIndex,
                                             priority: .high,
-                                            anchor: .center,  // Center when paused
+                                            anchor: nil,
                                             animated: true,
                                             reason: "Paused at \(String(format: "%.2f", currentTime))s",
                                             proxy: proxy
@@ -1137,7 +1138,7 @@ struct OptimizedReaderView: View {
                                     requestScroll(
                                         sentenceIndex: sentenceIndex,
                                         priority: .high,
-                                        anchor: .top,
+                                    anchor: nil,
                                         animated: true,
                                         reason: "Forward 10s",
                                         proxy: proxy
@@ -1462,42 +1463,28 @@ struct OptimizedReaderView: View {
             var shouldScroll = false
             var scrollAnchor: UnitPoint = .top
             
-            // CRITICAL FIX: Now we have scroll offset, we can properly calculate visible position
-            // The frame from .named("scroll") gives position in content space
-            // We convert to screen space using: screenY = contentY - scrollOffset
-            
             // Calculate sentence position in screen/visible coordinates
             let sentenceTopOnScreen = sentenceTop - scrollOffset
             let sentenceBottomOnScreen = sentenceBottom - scrollOffset
             
-            // PRIORITY 1: If sentence is taller than available height, always keep top visible
-            // This handles very long sentences that extend beyond the screen
-            if sentenceHeight > availableHeight {
-                // Sentence is taller than visible area - ensure top stays visible
-                if sentenceTopOnScreen < headerHeight || sentenceTopOnScreen > availableHeight {
-                    shouldScroll = true
-                    scrollAnchor = .top
-                }
-                // Also check if bottom is getting cut off by menu
-                else if sentenceBottomOnScreen > availableHeight - scrollThreshold {
-                    shouldScroll = true
-                    scrollAnchor = .top
-                }
-            }
-            // PRIORITY 2: Sentence starts above the visible area (out of view at top)
-            else if sentenceTopOnScreen < headerHeight {
-                shouldScroll = true
-                scrollAnchor = .top  // Scroll to show sentence start
-            }
-            // PRIORITY 3: Sentence starts below the visible area (out of view at bottom)
-            else if sentenceTopOnScreen > availableHeight {
-                shouldScroll = true
-                scrollAnchor = .top  // Scroll to show sentence start
-            }
-            // PRIORITY 4: Sentence bottom is getting close to menu (within threshold)
-            else if sentenceBottomOnScreen > availableHeight - scrollThreshold && sentenceTopOnScreen < availableHeight {
+            // Prefer center, but fallback to top when needed
+            shouldScroll = false
+            scrollAnchor = .center
+            
+            // Too tall to center or colliding with menu/header -> use top
+            if sentenceHeight > availableHeight ||
+                sentenceBottomOnScreen > availableHeight - scrollThreshold ||
+                sentenceTopOnScreen < headerHeight {
                 shouldScroll = true
                 scrollAnchor = .top
+            } else if sentenceTopOnScreen > availableHeight {
+                // Below viewport, bring it into view
+                shouldScroll = true
+                scrollAnchor = .center
+            } else {
+                // Center to keep aligned when within bounds
+                shouldScroll = true
+                scrollAnchor = .center
             }
             
             if shouldScroll {
@@ -1567,7 +1554,8 @@ struct OptimizedReaderView: View {
         anchor: UnitPoint? = nil,
         animated: Bool = true,
         reason: String,
-        proxy: ScrollViewProxy
+        proxy: ScrollViewProxy,
+        allowDuringScrubbingEnded: Bool = false
     ) {
         // Validate sentence index
         guard sentenceIndex >= 0 && sentenceIndex < preloadedData.sentences.count else {
@@ -1576,7 +1564,7 @@ struct OptimizedReaderView: View {
         }
         
         // Check if scrolling is allowed
-        guard shouldAllowScroll() else {
+        guard shouldAllowScroll(allowDuringScrubbingEnded: allowDuringScrubbingEnded) else {
             print("🚫 Scroll denied: \(reason) - mode: \(scrollMode)")
             return
         }
@@ -1588,7 +1576,7 @@ struct OptimizedReaderView: View {
         }
         
         // Determine anchor if not provided
-        let scrollAnchor = anchor ?? determineAnchor(for: scrollMode)
+        let scrollAnchor = anchor ?? determineAnchor(for: scrollMode, sentenceIndex: sentenceIndex)
         
         // Create request
         let request = ScrollRequest(
@@ -1604,7 +1592,7 @@ struct OptimizedReaderView: View {
     }
     
     /// Check if scrolling is currently allowed based on mode and disable flags
-    private func shouldAllowScroll() -> Bool {
+    private func shouldAllowScroll(allowDuringScrubbingEnded: Bool) -> Bool {
         // Check disableAutoScrollUntil first
         if let disableUntil = disableAutoScrollUntil, Date() < disableUntil {
             return false
@@ -1614,8 +1602,10 @@ struct OptimizedReaderView: View {
         switch scrollMode {
         case .none, .playing, .paused:
             return true
-        case .scrubbing, .scrubbingEnded:
+        case .scrubbing:
             return false
+        case .scrubbingEnded:
+            return allowDuringScrubbingEnded
         }
     }
     
@@ -1626,14 +1616,32 @@ struct OptimizedReaderView: View {
         return timeSinceLastScroll >= scrollThrottleInterval
     }
     
-    /// Determine scroll anchor based on current mode
-    private func determineAnchor(for mode: ScrollMode) -> UnitPoint {
-        switch mode {
-        case .playing, .none, .scrubbing, .scrubbingEnded:
-            return UnitPoint(x: 0.5, y: 0.0)  // Top anchor (consistent position for playback)
-        case .paused:
-            return UnitPoint(x: 0.5, y: 0.5)  // Center anchor when paused
+    /// Determine scroll anchor: center-first, fallback to top if it would be obscured by menu/header
+    private func determineAnchor(for mode: ScrollMode, sentenceIndex: Int) -> UnitPoint {
+        var anchor = UnitPoint(x: 0.5, y: 0.5) // center-first
+        
+        // If we have a measured frame for the current sentence, ensure it fits
+        if sentenceIndex == currentSentenceIndex, currentSentenceFrame != .zero {
+            let visibleHeight = scrollViewHeight > 0 ? scrollViewHeight : UIScreen.main.bounds.height
+            let menuHeight: CGFloat = isMenuExpanded ? 200 : 60
+            let headerHeight: CGFloat = 64
+            let availableHeight = visibleHeight - menuHeight
+            let sentenceHeight = currentSentenceFrame.height
+            
+            // If sentence won't fit centered or would collide with menu, fallback to top alignment
+            let bottomMargin: CGFloat = 80
+            let sentenceBottomOnScreen = currentSentenceFrame.maxY - scrollOffset
+            let menuLine = availableHeight
+            
+            let tooTallToCenter = sentenceHeight + headerHeight > availableHeight
+            let nearMenu = sentenceBottomOnScreen > (menuLine - bottomMargin)
+            
+            if tooTallToCenter || nearMenu {
+                anchor = UnitPoint(x: 0.5, y: 0.0)
+            }
         }
+        
+        return anchor
     }
     
     /// Process scroll request with priority system
