@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../create-anything/apps/mobile"
+		}
+	],
+	"settings": {
+		"editor.fontSize": 15
+	}
+}

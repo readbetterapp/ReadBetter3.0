@@ -1,0 +1,25 @@
+{
+  "name": "readbetter-cloud-functions",
+  "version": "1.0.0",
+  "description": "Cloud Functions for ReadBetter App - Auto-process books from GCS",
+  "main": "index.js",
+  "scripts": {
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0",
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": "18"
+  }
+}
+
+
+
+
+
+
+
+
