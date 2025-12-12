@@ -99,9 +99,13 @@ class TranscriptService {
     /// Parse transcript JSON - TIME-BASED word matching (more robust than text matching)
     private func parseTranscript(json: [String: Any]) throws -> TranscriptData {
         // STEP 1: Get the full transcript text (authoritative source for display)
-        let transcriptText = json["transcript"] as? String ??
+        // Normalize line endings immediately so offsets and sentence splitting are consistent.
+        let rawTranscriptText = json["transcript"] as? String ??
                             json["text"] as? String ??
                             ""
+        let transcriptText = rawTranscriptText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
         
         guard !transcriptText.isEmpty else {
             throw TranscriptError.noWordsFound
@@ -172,7 +176,8 @@ class TranscriptService {
         print("📊 TranscriptService: Found \(words.count) timed words")
         
         // STEP 3: Split transcript by \r\n\r\n to get sentences
-        let sentenceTexts = transcriptText.components(separatedBy: "\r\n\r\n")
+        // Split sentences on double newlines (after normalization above).
+        let sentenceTexts = transcriptText.components(separatedBy: "\n\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         
@@ -185,8 +190,12 @@ class TranscriptService {
         
         // Helper to normalize word for comparison (remove punctuation, lowercase)
         func normalizeWord(_ word: String) -> String {
-            return word.lowercased()
-                .trimmingCharacters(in: CharacterSet.punctuationCharacters)
+            // Remove surrounding quotes and punctuation, lowercase, trim whitespace.
+            let quoteChars = CharacterSet(charactersIn: "\"“”‘’‚‛‹›«»")
+            let punctuation = CharacterSet.punctuationCharacters.union(quoteChars)
+            return word
+                .lowercased()
+                .trimmingCharacters(in: punctuation)
                 .trimmingCharacters(in: .whitespaces)
         }
         
@@ -218,6 +227,8 @@ class TranscriptService {
         for sentenceText in sentenceTexts {
             let wordCount = sentenceText.components(separatedBy: .whitespaces)
                 .filter { !$0.isEmpty }
+                .map { normalizeWord($0) }
+                .filter { !$0.isEmpty }
                 .count
             sentenceWordCounts.append(wordCount)
             totalExpectedWords += wordCount
@@ -243,7 +254,7 @@ class TranscriptService {
         // Once a word is assigned, it is never reused by another sentence
         var assignedWordIndices: Set<Int> = []
         var wordCursor = 0
-        let lookahead = 10
+        let lookahead = 20
         
         for (sentenceIndex, sentenceText) in sentenceTexts.enumerated() {
             var sentenceWordIndices: [Int] = []
@@ -374,6 +385,56 @@ class TranscriptService {
         }
         if !missing.isEmpty {
             print("⚠️ TranscriptService: missing word assignments (showing first 20): \(missing.prefix(20)), total \(missing.count)")
+        }
+        
+        // Fallback: ensure every word ends up in a sentence.
+        // Sometimes minor tokenization differences (line breaks, punctuation, hyphen splits)
+        // cause the matcher to skip a block of words. We recover by assigning any
+        // remaining words to the closest sentence by time.
+        if !missing.isEmpty {
+            var mutableSentences = sentences
+            
+            for wIdx in missing {
+                let word = words[wIdx]
+                
+                // Find the sentence whose time window contains the word start,
+                // otherwise choose the closest sentence by start time.
+                var targetSentenceIndex: Int?
+                var smallestDistance = Double.greatestFiniteMagnitude
+                
+                for (sIdx, sentence) in mutableSentences.enumerated() {
+                    if word.start >= sentence.startTime && word.end <= sentence.endTime {
+                        targetSentenceIndex = sIdx
+                        break
+                    }
+                    let distance = abs(word.start - sentence.startTime)
+                    if distance < smallestDistance {
+                        smallestDistance = distance
+                        targetSentenceIndex = sIdx
+                    }
+                }
+                
+                if let sIdx = targetSentenceIndex {
+                    var sentence = mutableSentences[sIdx]
+                    var updated = sentence.wordIndices
+                    updated.append(wIdx)
+                    updated = Array(Set(updated)).sorted()
+                    
+                    // Update the sentence timing to include the new word bounds
+                    let newStart = min(sentence.startTime, word.start)
+                    let newEnd = max(sentence.endTime, word.end)
+                    
+                    sentence = TranscriptData.Sentence(
+                        text: sentence.text,
+                        wordIndices: updated,
+                        startTime: newStart,
+                        endTime: newEnd
+                    )
+                    mutableSentences[sIdx] = sentence
+                }
+            }
+            
+            sentences = mutableSentences
         }
         
         let matchedWords = sentences.reduce(0) { $0 + $1.wordIndices.count }

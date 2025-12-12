@@ -441,9 +441,10 @@ async function processBook(isbn, bucket, forceUpdate = false) {
   const descriptionInfo = await discoverDescription(isbn, bucket);
   
   // Allow books with either chapters OR description (or both)
+  // If neither is present, still create a metadata-only entry so the book
+  // shows up in the app and can be filled in later.
   if (chapters.length === 0 && !descriptionInfo) {
-    logger.info(`No valid chapters or description found for ${isbn}, skipping...`);
-    return { status: 'skipped', reason: 'no_chapters' };
+    logger.info(`No chapters or description found for ${isbn}; creating metadata-only entry.`);
   }
   
   const metadata = await fetchBookMetadata(isbn);

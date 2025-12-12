@@ -12,9 +12,11 @@ struct RootView: View {
     @StateObject private var router = AppRouter()
     @StateObject private var bookService = BookService.shared // Add this
     @State private var isReady = false
+    @State private var showSplash = true
+    @State private var splashOpacity: Double = 1.0
     
     var body: some View {
-        Group {
+        ZStack {
             if isReady {
                 NavigationStack(path: $router.path) {
                     WelcomeView()
@@ -28,6 +30,12 @@ struct RootView: View {
                 Color(themeManager.colors.background)
                     .ignoresSafeArea()
             }
+            
+            if showSplash {
+                SplashView()
+                    .opacity(splashOpacity)
+                    .transition(.opacity)
+            }
         }
         .onAppear {
             // Initialize app and pre-load books
@@ -40,12 +48,20 @@ struct RootView: View {
                     print("⚠️ Failed to pre-load books: \(error)")
                 }
                 
-                // Small delay for UI initialization
-                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+                await MainActor.run { isReady = true }
+                
+                // Hold splash for 3 seconds, then fade out smoothly
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 
                 await MainActor.run {
-                    isReady = true
+                    withAnimation(.easeInOut(duration: 0.6)) {
+                        splashOpacity = 0
+                    }
                 }
+                
+                // Remove splash view after fade completes
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                await MainActor.run { showSplash = false }
             }
         }
         .preferredColorScheme(themeManager.isDarkMode ? .dark : .light)
@@ -87,6 +103,30 @@ struct RootView: View {
         }
         .environmentObject(themeManager)
         .environmentObject(router)
+    }
+}
+
+// Simple splash screen shown while initial data loads
+private struct SplashView: View {
+    var body: some View {
+        ZStack {
+            Color.white
+                .ignoresSafeArea()
+            
+            HStack(spacing: 4) {
+                Text("Read")
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(ThemeColors.brand)
+                
+                Text("Better")
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundColor(.black)
+                    .padding(.leading, 8)
+            }
+        }
     }
 }
 

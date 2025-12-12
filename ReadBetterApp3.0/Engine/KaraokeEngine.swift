@@ -142,6 +142,21 @@ class KaraokeEngine: ObservableObject {
         var startTime: Double = Double.infinity
         var endTime: Double = 0
         
+        // Helper to strip quotes/punctuation from word boundaries for matching
+        func normalizeForSearch(_ text: String) -> String {
+            let quoteChars: Set<Character> = ["\"", "\u{201C}", "\u{201D}", "'", "\u{2018}", "\u{2019}", "\u{201A}", "\u{201B}", "\u{2039}", "\u{203A}", "\u{00AB}", "\u{00BB}", "\u{201E}", "\u{201F}", "`"]
+            var result = text
+            // Strip leading quotes/punctuation
+            while let first = result.first, quoteChars.contains(first) {
+                result = String(result.dropFirst())
+            }
+            // Strip trailing quotes/punctuation
+            while let last = result.last, quoteChars.contains(last) {
+                result = String(result.dropLast())
+            }
+            return result
+        }
+        
         // For each word index in the sentence, find its position in the text
         // IMPORTANT: Find words by original index (id), not array position
         // because some words may have been filtered out
@@ -160,16 +175,73 @@ class KaraokeEngine: ObservableObject {
             
             // Find word position in sentence text
             let searchText = word.text
+            let normalizedSearch = normalizeForSearch(searchText)
             var searchStart = sentenceText.startIndex
             
-            // Skip already found words
+            // Skip already found words (sequential search)
             if let lastRange = wordRanges.last {
                 searchStart = lastRange.range.upperBound
             }
             
-            // Search for the word
+            var foundRange: Range<String.Index>? = nil
+            
+            // Strategy 1: Sequential search with exact word text (case insensitive)
             if let range = sentenceText.range(of: searchText, options: [.caseInsensitive], range: searchStart..<sentenceText.endIndex) {
+                foundRange = range
+            }
+            
+            // Strategy 2: If not found, try normalized text (quotes stripped)
+            if foundRange == nil && normalizedSearch != searchText {
+                if let range = sentenceText.range(of: normalizedSearch, options: [.caseInsensitive], range: searchStart..<sentenceText.endIndex) {
+                    foundRange = range
+                }
+            }
+            
+            // Helper to check if two ranges overlap
+            func rangesOverlap(_ range1: Range<String.Index>, _ range2: Range<String.Index>) -> Bool {
+                return range1.lowerBound < range2.upperBound && range2.lowerBound < range1.upperBound
+            }
+            
+            // Strategy 3: If still not found, search from beginning of sentence (word might appear earlier due to text differences)
+            if foundRange == nil {
+                if let range = sentenceText.range(of: searchText, options: [.caseInsensitive], range: sentenceText.startIndex..<sentenceText.endIndex) {
+                    // Only use if not already used by another word
+                    let alreadyUsed = wordRanges.contains { rangesOverlap($0.range, range) }
+                    if !alreadyUsed {
+                        foundRange = range
+                    }
+                }
+            }
+            
+            // Strategy 4: Try normalized from beginning
+            if foundRange == nil && normalizedSearch != searchText {
+                if let range = sentenceText.range(of: normalizedSearch, options: [.caseInsensitive], range: sentenceText.startIndex..<sentenceText.endIndex) {
+                    let alreadyUsed = wordRanges.contains { rangesOverlap($0.range, range) }
+                    if !alreadyUsed {
+                        foundRange = range
+                    }
+                }
+            }
+            
+            // Strategy 5: Try word boundary matching (the word might be embedded with punctuation like "happiness,")
+            if foundRange == nil {
+                // Search for the word with word boundary awareness
+                let pattern = "\\b\(NSRegularExpression.escapedPattern(for: normalizedSearch))\\b"
+                if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                   let match = regex.firstMatch(in: sentenceText, options: [], range: NSRange(sentenceText.startIndex..., in: sentenceText)),
+                   let swiftRange = Range(match.range, in: sentenceText) {
+                    let alreadyUsed = wordRanges.contains { rangesOverlap($0.range, swiftRange) }
+                    if !alreadyUsed {
+                        foundRange = swiftRange
+                    }
+                }
+            }
+            
+            if let range = foundRange {
                 wordRanges.append((wordIndex: wordIndex, range: range))
+            } else {
+                // Log the failure for debugging
+                print("⚠️ KaraokeEngine: Could not find word '\(searchText)' (index \(wordIndex)) in sentence: \"\(sentenceText.prefix(50))...\"")
             }
         }
         

@@ -63,6 +63,11 @@ struct WordTiming: Identifiable, Codable {
         cleanedText = cleanedText.replacingOccurrences(of: "\\n\\n", with: " ")
         cleanedText = cleanedText.replacingOccurrences(of: "\\r", with: " ")
         cleanedText = cleanedText.replacingOccurrences(of: "\\n", with: " ")
+
+        // Strip leading/trailing quotes to align with transcript normalization
+        let quoteChars = CharacterSet(charactersIn: "\"“”‘’‚‛‹›«»")
+        cleanedText = cleanedText.trimmingCharacters(in: quoteChars)
+
         cleanedText = cleanedText.trimmingCharacters(in: .whitespaces)
         
         // FILTER 2: Skip punctuation-only tokens (no alphanumeric characters)

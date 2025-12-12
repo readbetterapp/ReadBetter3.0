@@ -25,6 +25,23 @@ enum TextSize: String, CaseIterable, Hashable {
         case .large: return 26
         }
     }
+    
+    // Approximate line height (font size × line spacing factor)
+    var lineHeight: CGFloat {
+        return fontSize * 1.35
+    }
+    
+    // Lines that fit on screen (measured on iPhone 15 Pro Max)
+    func linesPerScreen(menuOpen: Bool) -> Int {
+        switch (self, menuOpen) {
+        case (.small, true):  return 20
+        case (.small, false): return 24
+        case (.medium, true): return 15
+        case (.medium, false): return 21
+        case (.large, true):  return 13
+        case (.large, false): return 18
+        }
+    }
 }
 
 // MARK: - Submenu Type Enum
@@ -110,6 +127,47 @@ struct ScrollViewHeightPreferenceKey: PreferenceKey {
     }
 }
 
+// MARK: - Playback Controls Height Preference
+struct PlaybackControlsHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+// MARK: - Header Height Preference
+struct HeaderHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+// MARK: - Simplified Reading Container
+struct ReadingContainerView<Content: View>: View {
+    let headerHeight: CGFloat
+    let playbackControlsHeight: CGFloat
+    let safeMargin: CGFloat
+    let content: () -> Content
+    
+    var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                // Header space
+                Color.clear
+                    .frame(height: headerHeight + safeMargin)
+                
+                // Scrollable content area
+                content()
+                    .frame(height: geometry.size.height - headerHeight - playbackControlsHeight - (safeMargin * 2))
+                
+                // Bottom space for controls
+                Color.clear
+                    .frame(height: playbackControlsHeight + safeMargin + 50)
+            }
+        }
+    }
+}
 struct OptimizedReaderView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
@@ -124,9 +182,8 @@ struct OptimizedReaderView: View {
     @State private var displayLink: CADisplayLink?
     @State private var isScrubbing: Bool = false  // Track when user is scrubbing slider
     @State private var sliderValue: Double = 0  // Separate slider value to prevent fighting during scrubbing
-    // Scroll proxy and closure storage
+    // Scroll proxy for resync button
     @State private var scrollProxy: ScrollViewProxy? = nil
-    @State private var scrollToSentence: ((Int) -> Void)? = nil
     @State private var pendingSeekTime: Double? = nil  // Store target time during scrubbing, apply when scrubbing ends
     @State private var frozenCurrentWordIndex: Int? = nil  // Frozen value for views during scrubbing (prevents re-renders)
     @State private var frozenLastSpokenWordIndex: Int? = nil  // Frozen value for views during scrubbing (prevents re-renders)
@@ -137,43 +194,24 @@ struct OptimizedReaderView: View {
     
     // Optimization: Cache word-to-sentence mapping for O(1) lookup
     @State private var wordToSentenceMap: [Int: Int] = [:]  // wordIndex -> sentenceIndex
-    @State private var lastScrollTime: Date = Date()
-    private let scrollThrottleInterval: TimeInterval = 0.15  // Only scroll every 150ms
     
-    // Position tracking for long sentences
+    // Position tracking for resync button
     @State private var currentSentenceFrame: CGRect = .zero  // Track current sentence position
     @State private var scrollViewHeight: CGFloat = 0  // Track visible scroll view height
-    @State private var scrollOffset: CGFloat = 0  // Track scroll offset for proper coordinate calculations
-    @State private var lastPositionCheckTime: Date = Date()  // Throttle position checks
+    @State private var playbackControlsHeight: CGFloat = 0  // Track menu height for safe area
+    @State private var headerHeight: CGFloat = 0  // Track header height for safe area
+    private let safeMargin: CGFloat = 12  // Tight padding requested
     
-    // MARK: - Unified Scroll System
+    // MARK: - Simplified Scroll State
     enum ScrollMode {
-        case none           // No special mode
-        case playing        // Normal playback auto-scroll
-        case scrubbing      // User is scrubbing (disable auto-scroll)
-        case paused         // Paused (centered scroll allowed)
-        case scrubbingEnded // Just finished scrubbing
-    }
-    
-    enum ScrollPriority: Int {
-        case low = 1        // Position check for long sentences
-        case normal = 2     // Normal sentence change
-        case high = 3       // Scrubbing end, pause centering
-        case critical = 4   // Emergency (shouldn't happen)
-    }
-    
-    struct ScrollRequest {
-        let sentenceIndex: Int
-        let priority: ScrollPriority
-        let anchor: UnitPoint
-        let animated: Bool
-        let reason: String  // For debugging
+        case none
+        case playing
+        case scrubbing
+        case paused
     }
     
     @State private var scrollMode: ScrollMode = .none
-    @State private var pendingScrollRequest: ScrollRequest? = nil
-    @State private var disableAutoScrollUntil: Date? = nil  // Disable auto-scroll briefly after scrubbing to prevent competing scrolls
-    @State private var lastPauseScrollTime: Date? = nil  // Track last pause scroll to prevent duplicates
+    @State private var lastPauseScrollTime: Date? = nil
     
     // Chapter navigation
     var onChapterChange: ((Int) -> Void)?
@@ -186,6 +224,7 @@ struct OptimizedReaderView: View {
     @State private var isMenuExpanded: Bool = true
     @State private var activeSubmenu: SubmenuType? = nil
     @State private var isChapterDropdownOpen: Bool = false  // Track chapter dropdown visibility
+    @State private var isOutOfSync: Bool = false  // User scrolled away from auto-synced position
     
     // UserDefaults keys
     private let textSizeKey = "readerTextSize"
@@ -285,137 +324,114 @@ struct OptimizedReaderView: View {
                 headerView
                     .zIndex(100) // Ensure header is above content
                 
-                // Text Display
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        // Track scroll view height
-                        GeometryReader { scrollGeometry in
-                            Color.clear
-                                .preference(
-                                    key: ScrollViewHeightPreferenceKey.self,
-                                    value: scrollGeometry.size.height
-                                )
-                        }
-                        .frame(height: 0)
-                        
-                        LazyVStack(alignment: .leading, spacing: 20) {
-                            ForEach(Array(preloadedData.sentences.enumerated()), id: \.element.id) { index, sentence in
-                                OptimizedSentenceView(
-                                    sentence: sentence,
-                                    sentenceIndex: index,
-                                    currentSentenceIndex: currentSentenceIndex,
-                                    currentWordIndex: karaokeEngine.currentWordIndex,
-                                    lastSpokenWordIndex: karaokeEngine.lastSpokenWordIndex,
-                                    themeColors: readerColors,
-                                    textSize: textSize.fontSize,
-                                    highlightColor: highlightColor,
-                                    indexedWords: preloadedData.indexedWords,
-                                    onSentenceTap: {
-                                        // Tap-to-seek: jump to sentence's start time
-                                        let seekTime = sentence.startTime
-                                        
-                                        audioPlayer.seek(to: seekTime)
-                                        Task { @MainActor in
-                                            karaokeEngine.resetSearchState()
-                                            karaokeEngine.updateTime(seekTime, duration: audioPlayer.duration)
+                // Text Display with Simplified Container
+                ReadingContainerView(
+                    headerHeight: headerHeight,
+                    playbackControlsHeight: playbackControlsHeight,
+                    safeMargin: safeMargin
+                ) {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            GeometryReader { scrollGeometry in
+                                Color.clear
+                                    .onAppear { scrollViewHeight = scrollGeometry.size.height }
+                                    .onChange(of: scrollGeometry.size.height) { _, newValue in
+                                        scrollViewHeight = newValue
+                                    }
+                            }
+                            
+                            LazyVStack(alignment: .leading, spacing: 20) {
+                                ForEach(Array(preloadedData.sentences.enumerated()), id: \.element.id) { index, sentence in
+                                    OptimizedSentenceView(
+                                        sentence: sentence,
+                                        sentenceIndex: index,
+                                        currentSentenceIndex: currentSentenceIndex,
+                                        currentWordIndex: karaokeEngine.currentWordIndex,
+                                        lastSpokenWordIndex: karaokeEngine.lastSpokenWordIndex,
+                                        themeColors: readerColors,
+                                        textSize: textSize.fontSize,
+                                        highlightColor: highlightColor,
+                                        indexedWords: preloadedData.indexedWords,
+                                        onSentenceTap: {
+                                            // Tap-to-seek: jump to sentence's start time
+                                            let seekTime = sentence.startTime
                                             
-                                            // Request scroll to tapped sentence
-                                            if let proxy = scrollProxy {
-                                                requestScroll(
-                                                    sentenceIndex: index,
-                                                    priority: .high,
-                                                    anchor: nil,
-                                                    animated: true,
-                                                    reason: "Tapped sentence \(index)",
-                                                    proxy: proxy
-                                                )
+                                            audioPlayer.seek(to: seekTime)
+                                            Task { @MainActor in
+                                                karaokeEngine.resetSearchState()
+                                                karaokeEngine.updateTime(seekTime, duration: audioPlayer.duration)
+                                                
+                                                // Update current sentence index when tapped
+                                                currentSentenceIndex = index
+                                                
+                                                hapticGenerator?.impactOccurred(intensity: 0.5)
                                             }
-                                            
-                                            hapticGenerator?.impactOccurred(intensity: 0.5)
                                         }
-                                    }
-                                )
-                                .equatable() // Use Equatable to prevent unnecessary re-renders
-                                .id("\(index)-\(readerBackgroundColor.rawValue)") // Include background color in id to force rebuild on color change
-                                .background(
-                                    // CRITICAL FIX: Always measure, but only write preference for current sentence
-                                    // This prevents GeometryReader from appearing/disappearing during layout (which causes warnings)
-                                    GeometryReader { geometry in
-                                        Color.clear
-                                            .preference(
-                                                key: SentencePositionPreferenceKey.self,
-                                                value: index == currentSentenceIndex 
-                                                    ? geometry.frame(in: .named("scroll"))
-                                                    : .zero  // Only write non-zero for current sentence (handler ignores .zero)
-                                            )
-                                    }
-                                )
+                                    )
+                                    .equatable() // Use Equatable to prevent unnecessary re-renders
+                                    .id("\(index)-\(readerBackgroundColor.rawValue)") // Include background color in id to force rebuild on color change
+                                    .background(
+                                        // CRITICAL FIX: Always measure, but only write preference for current sentence
+                                        // This prevents GeometryReader from appearing/disappearing during layout (which causes warnings)
+                                        GeometryReader { geometry in
+                                            Color.clear
+                                                .preference(
+                                                    key: SentencePositionPreferenceKey.self,
+                                                    value: index == currentSentenceIndex 
+                                                        ? geometry.frame(in: .named("scroll"))
+                                                        : .zero  // Only write non-zero for current sentence (handler ignores .zero)
+                                                )
+                                        }
+                                    )
+                                }
                             }
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 24)
                         }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 24)
-                        .padding(.bottom, 100)
-                    }
-                    .coordinateSpace(name: "scroll")
-                    .scrollIndicators(.hidden)
-                    .overlay(
-                        // Track scroll offset for proper coordinate calculations
-                        GeometryReader { scrollOffsetGeometry in
-                            Color.clear
-                                .preference(
-                                    key: ScrollOffsetPreferenceKey.self,
-                                    value: scrollOffsetGeometry.frame(in: .named("scroll")).minY
-                                )
-                        }
-                        .frame(height: 0)
-                    )
-                    .onAppear {
-                        // Initialize scroll mode
-                        scrollMode = audioPlayer.isPlaying ? .playing : .paused
-                        
-                        // Store proxy reference for use outside ScrollViewReader scope
-                        scrollProxy = proxy
-                        
-                        // Store scroll closure for compatibility (uses unified system internally)
-                        scrollToSentence = { sentenceIndex in
-                            if let proxy = scrollProxy {
-                                requestScroll(
-                                    sentenceIndex: sentenceIndex,
-                                    priority: .high,
-                                    anchor: nil,
-                                    animated: true,
-                                    reason: "Scroll closure called",
-                                    proxy: proxy
-                                )
+                        .coordinateSpace(name: "scroll")
+                        .scrollIndicators(.hidden)
+                        // Detect user-driven scroll to mark out-of-sync
+                        .simultaneousGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { _ in
+                                    // Only mark out-of-sync when user scrolls (not scrubbing)
+                                    guard !isScrubbing else { return }
+                                    isOutOfSync = true
+                                }
+                        )
+                        .overlay(
+                            // Track scroll offset for proper coordinate calculations
+                            GeometryReader { scrollOffsetGeometry in
+                                Color.clear
+                                    .preference(
+                                        key: ScrollOffsetPreferenceKey.self,
+                                        value: scrollOffsetGeometry.frame(in: .named("scroll")).minY
+                                    )
                             }
+                            .frame(height: 0)
+                        )
+                        .onAppear {
+                            // Initialize scroll mode
+                            scrollMode = audioPlayer.isPlaying ? .playing : .paused
+                            
+                            // Store proxy reference for use outside ScrollViewReader scope
+                            scrollProxy = proxy
                         }
-                    }
-                    .onPreferenceChange(SentencePositionPreferenceKey.self) { frame in
+                        .onPreferenceChange(SentencePositionPreferenceKey.self) { frame in
                         // Only update frame if it's valid and for the current sentence
                         // This prevents false updates from other sentences
                         guard frame != .zero else { return }
                         // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
                         // Capture proxy explicitly for async closure
-                        let capturedProxy = proxy
                         DispatchQueue.main.async {
                             currentSentenceFrame = frame
-                            
-                            // Trigger position check when frame updates (only if we have a valid word index)
-                            // Only check if we're not scrubbing and have a valid word
-                            guard !isScrubbing, let wordIndex = karaokeEngine.currentWordIndex else { return }
-                            checkAndScrollIfNeeded(proxy: capturedProxy, wordIndex: wordIndex)
-                        }
-                    }
-                    .onPreferenceChange(ScrollViewHeightPreferenceKey.self) { height in
-                        // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
-                        DispatchQueue.main.async {
-                            scrollViewHeight = height
-                        }
-                    }
-                    .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
-                        // Track scroll offset for proper coordinate calculations
-                        DispatchQueue.main.async {
-                            scrollOffset = -value // Invert to get positive scroll down value
+                            // #region agent log
+                            agentDebugLog("H1", "OptimizedReaderView.swift:SentencePositionPreference", "updated currentSentenceFrame", [
+                                "frameMinY": frame.minY,
+                                "frameHeight": frame.height,
+                                "currentSentenceIndex": currentSentenceIndex
+                            ])
+                            // #endregion agent log
                         }
                     }
                     .onChange(of: karaokeEngine.currentWordIndex) { oldValue, newValue in
@@ -434,10 +450,13 @@ struct OptimizedReaderView: View {
                                 return
                             }
                             
-                            // Skip if this word was not mapped to any sentence (defensive)
-                            guard wordToSentenceMap[wordIndex] != nil else {
-                                return
-                            }
+                            // #region agent log
+                            agentDebugLog("H3", "OptimizedReaderView.swift:currentWordIndex", "word change", [
+                                "wordIndex": wordIndex,
+                                "currentSentenceIndex": currentSentenceIndex,
+                                "foundSentenceIndex": findSentenceAtTime(getCurrentAudioTime()) ?? -1
+                            ])
+                            // #endregion agent log
                             
                             // Trigger haptic feedback when word changes during normal playback
                             if wordIndex != lastHapticWordIndex {
@@ -445,28 +464,17 @@ struct OptimizedReaderView: View {
                                 lastHapticWordIndex = wordIndex
                             }
                             
-                            // Find sentence for current word using unified scroll system
-                            // ALWAYS use time-based lookup for consistency (word-to-sentence map can be wrong)
+                            // Time-based sentence lookup for scrolling only (highlighting is time/word-driven)
                             let currentTime = getCurrentAudioTime()
-                            guard let sentenceIndex = findSentenceAtTime(currentTime) else {
-                                return // No sentence found at this time
+                            let sentenceIndex = findSentenceAtTime(currentTime)
+                            
+                            guard let sentenceIndex else {
+                                // No sentence found; skip scrolling but keep highlighting active
+                                return
                             }
                             
-                            // Only scroll if sentence actually changed
-                            guard sentenceIndex != currentSentenceIndex else {
-                                return // Already on correct sentence
-                            }
-                            
-                            // Request scroll through unified system
-                            requestScroll(
-                                sentenceIndex: sentenceIndex,
-                                priority: .normal,
-                                animated: true,
-                                reason: "Word changed to \(wordIndex)",
-                                proxy: capturedProxy
-                            )
-                            // NOTE: Position-based scrolling for long sentences is handled by preference change handler
-                            // (onPreferenceChange(SentencePositionPreferenceKey)) to avoid double-firing
+                            // Update current sentence index for tracking (no auto-scroll)
+                            currentSentenceIndex = sentenceIndex
                         }
                     }
                     .onChange(of: isScrubbing) { oldValue, newValue in
@@ -477,10 +485,8 @@ struct OptimizedReaderView: View {
                                 scrollMode = .scrubbing
                                 hapticGenerator?.prepare()
                             } else {
-                                // Scrubbing ended - update mode and reset haptic tracking
-                                scrollMode = .scrubbingEnded
+                                // Scrubbing ended - resume playing mode and reset haptic tracking
                                 lastHapticWordIndex = nil
-                                // Allow immediate scroll after scrubbing ends
                                 scrollMode = .playing
                             }
                         }
@@ -500,7 +506,7 @@ struct OptimizedReaderView: View {
                         DispatchQueue.main.async {
                             if newValue {
                                 // Started playing - set mode to playing (unless scrubbing)
-                                if scrollMode != .scrubbing && scrollMode != .scrubbingEnded {
+                                if scrollMode != .scrubbing {
                                     scrollMode = .playing
                                 }
                             } else {
@@ -511,11 +517,12 @@ struct OptimizedReaderView: View {
                             }
                         }
                     }
-                }
+                } // Close ScrollViewReader
+                } // Close ReadingContainerView content
                 
                 // Playback Controls
                 playbackControls
-            }
+            } // Close VStack
             
             // Chapter dropdown menu - positioned at body level to avoid clipping
             if isChapterDropdownOpen && hasChapters {
@@ -627,6 +634,16 @@ struct OptimizedReaderView: View {
             // Save to UserDefaults
             UserDefaults.standard.set(newValue.rawValue, forKey: readerBackgroundColorKey)
         }
+        .onPreferenceChange(HeaderHeightPreferenceKey.self) { value in
+            DispatchQueue.main.async {
+                headerHeight = value
+            }
+        }
+        .onPreferenceChange(PlaybackControlsHeightPreferenceKey.self) { value in
+            DispatchQueue.main.async {
+                playbackControlsHeight = value
+            }
+        }
         .onDisappear {
             // Clean up CADisplayLink
             displayLink?.invalidate()
@@ -734,6 +751,15 @@ struct OptimizedReaderView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .preference(
+                        key: HeaderHeightPreferenceKey.self,
+                        value: geo.size.height
+                    )
+            }
+        )
     }
     
     // MARK: - Chapter Navigation
@@ -921,23 +947,14 @@ struct OptimizedReaderView: View {
                                                     // Seek audio to final position and wait for completion
                                                     let actualTime = await audioPlayer.seekAndWait(to: targetTime)
                                                     
-                                                    // CRITICAL: Reset engine's search state for large jumps to force binary search
-                                                    // This prevents slow sequential fast-forward when jumping far ahead
-                                                    // Check if this is a large jump (more than 5 seconds difference)
-                                                    let timeDifference = abs(targetTime - actualTime)
-                                                    if timeDifference > 5.0 {
-                                                        karaokeEngine.resetSearchState()
-                                                    }
+                                                // Reset search state before applying the new time for accuracy
+                                                karaokeEngine.resetSearchState()
                                                     
-                                                    // CRITICAL FIX: Always find the last word that should be marked as spoken
-                                                    // This ensures ALL words up to current position are black, not white
-                                                    // For large jumps, this is essential to prevent white words and incorrect highlighting
+                                                    // Always find the last word that ends at or before actualTime
                                                     let indexedWords = karaokeEngine.getIndexedWords()
                                                     var lastSpokenWordIndex: Int? = nil
                                                     var lastSpokenWordEndTime: Double = 0
                                                     
-                                                    // Find the last word that ends at or before actual time
-                                                    // This marks all words up to current position as spoken
                                                     for word in indexedWords.reversed() {
                                                         if word.end <= actualTime && word.end.isFinite && word.start.isFinite {
                                                             lastSpokenWordIndex = word.id
@@ -946,38 +963,23 @@ struct OptimizedReaderView: View {
                                                         }
                                                     }
                                                     
-                                                    // CRITICAL FIX: Update to last spoken word's end time FIRST
-                                                    // This sets lastSpokenWordIndex correctly for all words up to current position
-                                                    // This prevents white words and sentences ahead being highlighted incorrectly
                                                     if let lastSpoken = lastSpokenWordIndex {
                                                         karaokeEngine.updateTime(lastSpokenWordEndTime, duration: duration)
                                                     }
                                                     
-                                                    // Now update to actual time to set currentWordIndex correctly
-                                                    // This ensures the current word is highlighted correctly
+                                                    // Apply the actual landed time
                                                     karaokeEngine.updateTime(actualTime, duration: duration)
                                                     
-                                                    // Check for word change and trigger haptic feedback
+                                                    // Haptic for current word if changed
                                                     if let currentWord = karaokeEngine.currentWordIndex,
                                                        currentWord != lastHapticWordIndex {
                                                         hapticGenerator?.impactOccurred(intensity: 0.7)
                                                         lastHapticWordIndex = currentWord
                                                     }
                                                     
-                                                    // Find sentence at scrubbed position and request scroll
-                                                    // Use unified scroll system with high priority
-                                                    // Use stored scrollProxy since we're in nested Task closure
-                                                    if let sentenceIndex = findSentenceAtTime(actualTime),
-                                                       let scrollProxy = scrollProxy {
-                                                        requestScroll(
-                                                            sentenceIndex: sentenceIndex,
-                                                            priority: .high,
-                                                            anchor: nil,  // Center-first with fallback
-                                                            animated: false,  // Instant scroll
-                                                            reason: "Scrubbing ended at \(String(format: "%.2f", actualTime))s",
-                                                            proxy: scrollProxy,
-                                                            allowDuringScrubbingEnded: true
-                                                        )
+                                                    // Update current sentence index (no auto-scroll)
+                                                    if let sentenceIndex = findSentenceAtTime(actualTime) {
+                                                        currentSentenceIndex = sentenceIndex
                                                     }
                                                     
                                                     // Clear pending seek time
@@ -1027,17 +1029,9 @@ struct OptimizedReaderView: View {
                                 let updatedTime = audioPlayer.getCurrentTime()
                                 karaokeEngine.updateTime(updatedTime, duration: audioPlayer.duration)
                                 
-                                // Update scroll to new position
-                                if let sentenceIndex = findSentenceAtTime(updatedTime),
-                                   let proxy = scrollProxy {
-                                    requestScroll(
-                                        sentenceIndex: sentenceIndex,
-                                        priority: .high,
-                                    anchor: nil,
-                                        animated: true,
-                                        reason: "Rewind 10s",
-                                        proxy: proxy
-                                    )
+                                // Update current sentence index (no auto-scroll)
+                                if let sentenceIndex = findSentenceAtTime(updatedTime) {
+                                    currentSentenceIndex = sentenceIndex
                                 }
                             }
                         }) {
@@ -1078,34 +1072,11 @@ struct OptimizedReaderView: View {
                                 // Now update to current time to set currentWordIndex correctly
                                 karaokeEngine.updateTime(currentTime, duration: audioPlayer.duration)
                                 
-                                // Update scroll mode and request scroll if paused
+                                // Update scroll mode
                                 if !audioPlayer.isPlaying {
                                     scrollMode = .paused
-                                    
-                                    // CRITICAL FIX: Only scroll on pause once per pause event
-                                    // Prevent multiple scrolls when pause button is tapped multiple times
-                                    let now = Date()
-                                    if let lastPause = lastPauseScrollTime, now.timeIntervalSince(lastPause) < 0.5 {
-                                        // Already scrolled recently on pause, skip
-                                        return
-                                    }
-                                    lastPauseScrollTime = now
-                                    
-                                    if let sentenceIndex = findSentenceAtTime(currentTime),
-                                       let proxy = scrollProxy {
-                                        requestScroll(
-                                            sentenceIndex: sentenceIndex,
-                                            priority: .high,
-                                            anchor: nil,
-                                            animated: true,
-                                            reason: "Paused at \(String(format: "%.2f", currentTime))s",
-                                            proxy: proxy
-                                        )
-                                    }
                                 } else {
                                     scrollMode = .playing
-                                    // Clear pause scroll tracking when playing resumes
-                                    lastPauseScrollTime = nil
                                 }
                             }
                         }) {
@@ -1132,17 +1103,9 @@ struct OptimizedReaderView: View {
                                 let updatedTime = audioPlayer.getCurrentTime()
                                 karaokeEngine.updateTime(updatedTime, duration: audioPlayer.duration)
                                 
-                                // Update scroll to new position
-                                if let sentenceIndex = findSentenceAtTime(updatedTime),
-                                   let proxy = scrollProxy {
-                                    requestScroll(
-                                        sentenceIndex: sentenceIndex,
-                                        priority: .high,
-                                    anchor: nil,
-                                        animated: true,
-                                        reason: "Forward 10s",
-                                        proxy: proxy
-                                    )
+                                // Update current sentence index (no auto-scroll)
+                                if let sentenceIndex = findSentenceAtTime(updatedTime) {
+                                    currentSentenceIndex = sentenceIndex
                                 }
                             }
                         }) {
@@ -1190,6 +1153,43 @@ struct OptimizedReaderView: View {
                 .foregroundColor(readerColors.cardBorder),
             alignment: .top
         )
+        .overlay(alignment: .top) {
+            if isOutOfSync {
+                backToSyncButton
+                    .offset(y: -50) // sit just above the menu line whether open or collapsed
+                    .transition(.opacity)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isOutOfSync)
+            }
+            GeometryReader { geo in
+                Color.clear
+                    .preference(
+                        key: PlaybackControlsHeightPreferenceKey.self,
+                        value: geo.size.height
+                    )
+            }
+            .frame(height: 0)
+        }
+    }
+    
+    // MARK: - Back to Sync Button
+    private var backToSyncButton: some View {
+        Button(action: {
+            resyncToCurrentSentence()
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Back to Sync")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .foregroundColor(readerColors.primaryText)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(readerColors.primary)
+            .clipShape(Capsule())
+            .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
+        }
+        .buttonStyle(PlainButtonStyle())
     }
     
     // MARK: - Settings Button Row
@@ -1409,99 +1409,6 @@ struct OptimizedReaderView: View {
         }
     }
     
-    // MARK: - Check Position and Scroll if Needed (for long sentences)
-    private func checkAndScrollIfNeeded(proxy: ScrollViewProxy, wordIndex: Int?) {
-        guard let wordIndex = wordIndex else {
-            return
-        }
-        
-        // Use time-based lookup to find sentence (more reliable than word-to-sentence map)
-        let currentTime = getCurrentAudioTime()
-        guard let sentenceIndex = findSentenceAtTime(currentTime),
-              sentenceIndex == currentSentenceIndex else {
-            return  // Only check position for current sentence
-        }
-        
-        // Prevent scrolling during sentence transitions
-        guard !isScrubbing else { return }
-        
-        // Validate that we have valid frame data
-        guard currentSentenceFrame != .zero else { return }
-        
-        // Throttle position checks (reduced to 100ms for more responsive scrolling)
-        let now = Date()
-        guard now.timeIntervalSince(lastPositionCheckTime) >= 0.1 else {
-            return
-        }
-        
-        // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
-        // Capture proxy explicitly for async closure
-        let capturedProxy = proxy
-        DispatchQueue.main.async {
-            lastPositionCheckTime = now
-            
-            // Calculate menu height based on state
-            // Adjust these values based on your actual menu heights
-            let menuHeight: CGFloat = isMenuExpanded ? 200 : 60
-            let headerHeight: CGFloat = 64  // Header height
-            
-            // Calculate visible area (screen height minus menu)
-            let visibleHeight = scrollViewHeight > 0 ? scrollViewHeight : UIScreen.main.bounds.height
-            guard visibleHeight > 0 else { return }  // Ensure we have valid height
-            
-            let availableHeight = visibleHeight - menuHeight
-            
-            // Calculate sentence position
-            let sentenceBottom = currentSentenceFrame.maxY
-            let sentenceTop = currentSentenceFrame.minY
-            let sentenceHeight = sentenceBottom - sentenceTop
-            
-            // Validate sentence frame is reasonable
-            guard sentenceBottom > sentenceTop, sentenceBottom > 0 else { return }
-            
-            let scrollThreshold: CGFloat = 100  // Threshold for earlier activation
-            var shouldScroll = false
-            var scrollAnchor: UnitPoint = .top
-            
-            // Calculate sentence position in screen/visible coordinates
-            let sentenceTopOnScreen = sentenceTop - scrollOffset
-            let sentenceBottomOnScreen = sentenceBottom - scrollOffset
-            
-            // Prefer center, but fallback to top when needed
-            shouldScroll = false
-            scrollAnchor = .center
-            
-            // Too tall to center or colliding with menu/header -> use top
-            if sentenceHeight > availableHeight ||
-                sentenceBottomOnScreen > availableHeight - scrollThreshold ||
-                sentenceTopOnScreen < headerHeight {
-                shouldScroll = true
-                scrollAnchor = .top
-            } else if sentenceTopOnScreen > availableHeight {
-                // Below viewport, bring it into view
-                shouldScroll = true
-                scrollAnchor = .center
-            } else {
-                // Center to keep aligned when within bounds
-                shouldScroll = true
-                scrollAnchor = .center
-            }
-            
-            if shouldScroll {
-                // Request scroll through unified system with low priority
-                // This ensures normal sentence changes take precedence
-                requestScroll(
-                    sentenceIndex: sentenceIndex,
-                    priority: .low,
-                    anchor: scrollAnchor,
-                    animated: true,
-                    reason: "Long sentence position check",
-                    proxy: capturedProxy
-                )
-            }
-        }
-    }
-    
     // MARK: - Sentence-Based Scrolling (for scrubbing)
     
     /// Find which sentence contains the given time using binary search for efficiency
@@ -1544,151 +1451,93 @@ struct OptimizedReaderView: View {
         return nil
     }
     
-    // MARK: - Unified Scroll System
+    // MARK: - Smart Positioning System
     
-    /// Request a scroll through the unified scroll system
-    /// All scroll requests go through this function to prevent conflicts
-    private func requestScroll(
-        sentenceIndex: Int,
-        priority: ScrollPriority,
-        anchor: UnitPoint? = nil,
-        animated: Bool = true,
-        reason: String,
-        proxy: ScrollViewProxy,
-        allowDuringScrubbingEnded: Bool = false
-    ) {
-        // Validate sentence index
-        guard sentenceIndex >= 0 && sentenceIndex < preloadedData.sentences.count else {
-            print("⚠️ Scroll request denied: Invalid sentence index \(sentenceIndex)")
-            return
-        }
-        
-        // Check if scrolling is allowed
-        guard shouldAllowScroll(allowDuringScrubbingEnded: allowDuringScrubbingEnded) else {
-            print("🚫 Scroll denied: \(reason) - mode: \(scrollMode)")
-            return
-        }
-        
-        // Check throttle
-        guard shouldThrottleScroll() else {
-            print("⏸️ Scroll throttled: \(reason)")
-            return
-        }
-        
-        // Determine anchor if not provided
-        let scrollAnchor = anchor ?? determineAnchor(for: scrollMode, sentenceIndex: sentenceIndex)
-        
-        // Create request
-        let request = ScrollRequest(
-            sentenceIndex: sentenceIndex,
-            priority: priority,
-            anchor: scrollAnchor,
-            animated: animated,
-            reason: reason
-        )
-        
-        // Process request
-        processScrollRequest(request, proxy: proxy)
-    }
-    
-    /// Check if scrolling is currently allowed based on mode and disable flags
-    private func shouldAllowScroll(allowDuringScrubbingEnded: Bool) -> Bool {
-        // Check disableAutoScrollUntil first
-        if let disableUntil = disableAutoScrollUntil, Date() < disableUntil {
-            return false
-        }
-        
-        // Then check mode
-        switch scrollMode {
-        case .none, .playing, .paused:
-            return true
-        case .scrubbing:
-            return false
-        case .scrubbingEnded:
-            return allowDuringScrubbingEnded
-        }
-    }
-    
-    /// Check if scroll should be throttled (rate limiting)
-    private func shouldThrottleScroll() -> Bool {
-        let now = Date()
-        let timeSinceLastScroll = now.timeIntervalSince(lastScrollTime)
-        return timeSinceLastScroll >= scrollThrottleInterval
-    }
-    
-    /// Determine scroll anchor: center-first, fallback to top if it would be obscured by menu/header
-    private func determineAnchor(for mode: ScrollMode, sentenceIndex: Int) -> UnitPoint {
-        var anchor = UnitPoint(x: 0.5, y: 0.5) // center-first
-        
-        // If we have a measured frame for the current sentence, ensure it fits
-        if sentenceIndex == currentSentenceIndex, currentSentenceFrame != .zero {
-            let visibleHeight = scrollViewHeight > 0 ? scrollViewHeight : UIScreen.main.bounds.height
-            let menuHeight: CGFloat = isMenuExpanded ? 200 : 60
-            let headerHeight: CGFloat = 64
-            let availableHeight = visibleHeight - menuHeight
-            let sentenceHeight = currentSentenceFrame.height
-            
-            // If sentence won't fit centered or would collide with menu, fallback to top alignment
-            let bottomMargin: CGFloat = 80
-            let sentenceBottomOnScreen = currentSentenceFrame.maxY - scrollOffset
-            let menuLine = availableHeight
-            
-            let tooTallToCenter = sentenceHeight + headerHeight > availableHeight
-            let nearMenu = sentenceBottomOnScreen > (menuLine - bottomMargin)
-            
-            if tooTallToCenter || nearMenu {
-                anchor = UnitPoint(x: 0.5, y: 0.0)
-            }
-        }
-        
-        return anchor
-    }
-    
-    /// Process scroll request with priority system
-    private func processScrollRequest(_ request: ScrollRequest, proxy: ScrollViewProxy) {
-        // If there's a pending request, compare priorities
-        if let pending = pendingScrollRequest {
-            if request.priority.rawValue > pending.priority.rawValue {
-                // New request has higher priority, replace
-                print("🔄 Replacing pending scroll (\(pending.reason)) with higher priority (\(request.reason))")
-                pendingScrollRequest = request
-                executeScroll(request, proxy: proxy)
-            } else {
-                // Pending has higher or equal priority, ignore new request
-                print("⏭️ Ignoring scroll request (\(request.reason)) - pending (\(pending.reason)) has higher/equal priority")
-            }
-            return
-        }
-        
-        // No pending request, execute immediately
-        pendingScrollRequest = request
-        executeScroll(request, proxy: proxy)
-    }
-    
-    /// Execute the scroll request
-    private func executeScroll(_ request: ScrollRequest, proxy: ScrollViewProxy) {
-        // Update state
-        currentSentenceIndex = request.sentenceIndex
-        lastScrollTime = Date()
-        pendingScrollRequest = nil
-        
-        // Execute scroll
-        let scrollID = "\(request.sentenceIndex)-\(readerBackgroundColor.rawValue)"
-        
-        // Debug: Show anchor in readable format
-        let anchorDesc = request.anchor == UnitPoint(x: 0.5, y: 0.0) ? "top" : 
-                        request.anchor == UnitPoint(x: 0.5, y: 0.5) ? "center" : 
-                        "\(request.anchor)"
-        print("📍 Executing scroll: \(request.reason) - sentence \(request.sentenceIndex), anchor: \(anchorDesc)")
-        
-        if request.animated {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                proxy.scrollTo(scrollID, anchor: request.anchor)
-            }
+    // Calculate optimal anchor point for sentence based on height and viewport
+    // Menu-aware: accounts for header and playback controls height
+    private func calculateSentenceAnchor(sentenceHeight: CGFloat, viewportHeight: CGFloat, progress: Double = 0.0) -> UnitPoint {
+        if sentenceHeight <= viewportHeight {
+            // Short sentence - center it in available viewport
+            return .center
         } else {
-            proxy.scrollTo(scrollID, anchor: request.anchor)
+            // Long sentence - position to show content without going past header
+            // Use progress for long sentences to show current reading position
+            let targetY = progress > 0 ? progress : 0.2  // Default to 20% from top for new sentences
+            return UnitPoint(x: 0.5, y: min(targetY, 0.8))  // Never go below 80% to avoid footer overlap
         }
     }
+    
+    // Get current available viewport height accounting for UI elements
+    private func getAvailableViewportHeight() -> CGFloat {
+        return max(scrollViewHeight - headerHeight - playbackControlsHeight - (safeMargin * 2), 100)
+    }
+    
+
+    
+    
+    // Estimate progress within the current sentence using word index
+    private func currentSentenceProgress() -> Double {
+        guard let wordIndex = karaokeEngine.currentWordIndex,
+              currentSentenceIndex >= 0,
+              currentSentenceIndex < preloadedData.sentences.count else { return 0 }
+        
+        let sentence = preloadedData.sentences[currentSentenceIndex]
+        let words = sentence.globalWordIndices
+        guard let position = words.firstIndex(of: wordIndex), !words.isEmpty else { return 0 }
+        return Double(position + 1) / Double(words.count)
+    }
+    
+    // Manually re-align scroll to the sentence at the current audio time
+    private func resyncToCurrentSentence() {
+        let currentTime = getCurrentAudioTime()
+        guard let sentenceIndex = findSentenceAtTime(currentTime),
+              let proxy = scrollProxy else { return }
+        
+        let sentenceHeight = currentSentenceFrame.height
+        let viewportHeight = getAvailableViewportHeight()
+        
+        // Calculate optimal anchor using unified positioning logic
+        let progress = currentSentenceProgress()
+        let anchor = calculateSentenceAnchor(sentenceHeight: sentenceHeight, viewportHeight: viewportHeight, progress: progress)
+        
+        // Update current sentence index
+        currentSentenceIndex = sentenceIndex
+        isOutOfSync = false
+        
+        let scrollID = "\(sentenceIndex)-\(readerBackgroundColor.rawValue)"
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(scrollID, anchor: anchor)
+        }
+    }
+    
+    // #region agent log helper
+    private func agentDebugLog(_ hypothesisId: String, _ location: String, _ message: String, _ data: [String: Any]) {
+        let payload: [String: Any] = [
+            "sessionId": "debug-session",
+            "runId": "run1",
+            "hypothesisId": hypothesisId,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": Int(Date().timeIntervalSince1970 * 1000)
+        ]
+        if let jsonData = try? JSONSerialization.data(withJSONObject: payload),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            let logLine = jsonString + "\n"
+            let logURL = URL(fileURLWithPath: "/Users/ermin/Desktop/ReadBetterApp3.0/.cursor/debug.log")
+            if let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                if let data = logLine.data(using: .utf8) {
+                    handle.write(data)
+                }
+                try? handle.close()
+            } else {
+                try? logLine.write(to: logURL, atomically: true, encoding: .utf8)
+            }
+        }
+    }
+    // #endregion agent log helper
+    
     
     // MARK: - Helper Methods
     
@@ -1883,7 +1732,7 @@ struct OptimizedSentenceView: View {
             .filter { sentence.globalWordIndices.contains($0.wordIndex) }
             .sorted { $0.range.lowerBound < $1.range.lowerBound }
         
-        // Apply word colors efficiently
+        // Apply word colors efficiently (purely by time-based currentWordIndex; ignore sentence gating)
         for (wordIndex, range) in sentence.wordRanges {
             guard sentence.globalWordIndices.contains(wordIndex) else { continue }
             guard range.lowerBound >= text.startIndex,

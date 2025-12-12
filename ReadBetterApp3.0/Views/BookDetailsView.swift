@@ -119,7 +119,17 @@ struct BookDetailsView: View {
     
     // MARK: - Book Cover Section
     private func bookCoverSection(book: Book) -> some View {
-        VStack(spacing: 24) {
+        let hasChapters = !book.chapters.isEmpty
+        let hasDescriptionContent = book.hasDescription == true &&
+                                    book.descriptionAudioUrl != nil &&
+                                    book.descriptionJsonUrl != nil
+        let hasPlayableContent = hasChapters || hasDescriptionContent
+        let buttonLabel = hasChapters ? "Start Reading" : "Coming Soon"
+        let buttonIcon = hasChapters ? "play.fill" : "clock"
+        let buttonBackground = hasChapters ? themeManager.colors.primary : themeManager.colors.cardBorder
+        let buttonTextColor = hasChapters ? themeManager.colors.primaryText : themeManager.colors.textSecondary
+        
+        return VStack(spacing: 24) {
             // Book Cover
             if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
                 AsyncImage(url: url) { image in
@@ -168,27 +178,48 @@ struct BookDetailsView: View {
             // Action Buttons
             VStack(spacing: 12) {
                 Button(action: {
+                    guard hasChapters else { return }
                     // Navigate to reader (start from first chapter)
                     router.navigate(to: .reader(bookId: book.id, chapterNumber: nil))
                 }) {
                     HStack(spacing: 8) {
-                        Image(systemName: "play.fill")
+                        Image(systemName: buttonIcon)
                             .font(.system(size: 16, weight: .semibold))
-                        Text("Start Reading")
+                        Text(buttonLabel)
                             .font(.system(size: 16, weight: .semibold))
                     }
-                    .foregroundColor(themeManager.colors.primaryText)
+                    .foregroundColor(buttonTextColor)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
-                    .background(themeManager.colors.primary)
+                    .background(buttonBackground)
                     .clipShape(Capsule())
+                    .opacity(hasChapters ? 1.0 : 0.4)
+                }
+                .disabled(!hasChapters)
+                
+                if !hasPlayableContent {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(themeManager.colors.accent)
+                        Text("Book unavailable")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(themeManager.colors.text)
+                        Spacer()
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 14)
+                    .background(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 
                 // Read Summary button (only show if book has description)
                 // Check both the flag and that URLs exist (more robust)
-                if book.hasDescription == true && 
-                   book.descriptionAudioUrl != nil && 
-                   book.descriptionJsonUrl != nil {
+                if hasDescriptionContent {
                     Button(action: {
                         // Navigate to description reader
                         router.navigate(to: .descriptionReader(bookId: book.id))
