@@ -9,11 +9,26 @@ import SwiftUI
 
 struct BookmarksView: View {
     @EnvironmentObject var themeManager: ThemeManager
+    @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var authManager: AuthManager
+    @EnvironmentObject var bookmarkService: BookmarkService
     @State private var scrollOffset: CGFloat = 0
+    
+    @State private var isCreateFolderPresented: Bool = false
+    @State private var newFolderName: String = ""
+    @State private var selectedFolder: BookmarkFolder? = nil
     
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
+                if let error = bookmarkService.lastErrorMessage {
+                    Text(error)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.red)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                }
+                
                 // Header
                 HStack {
                         Text("Bookmarks")
@@ -36,7 +51,10 @@ struct BookmarksView: View {
                                     )
                             }
                             
-                            Button(action: {}) {
+                            Button(action: {
+                                newFolderName = ""
+                                isCreateFolderPresented = true
+                            }) {
                                 Image(systemName: "plus")
                                     .font(.system(size: 20))
                                     .foregroundColor(themeManager.colors.primaryText)
@@ -54,13 +72,13 @@ struct BookmarksView: View {
                     HStack(spacing: 12) {
                         StatCard(
                             icon: "bookmark.fill",
-                            value: "0",
+                            value: "\(bookmarkService.bookmarks.count)",
                             label: "Total Bookmarks"
                         )
                         
                         StatCard(
                             icon: "folder.fill",
-                            value: "0",
+                            value: "\(bookmarkService.folders.count)",
                             label: "Collections"
                         )
                     }
@@ -77,21 +95,39 @@ struct BookmarksView: View {
                             Spacer()
                             
                             Button("Create New") {
-                                // Create collection action
+                                newFolderName = ""
+                                isCreateFolderPresented = true
                             }
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(themeManager.colors.primary)
                         }
                         .padding(.horizontal, 16)
                         
-                        // Empty Collections State
-                        EmptyStateCard(
-                            icon: "folder.fill",
-                            title: "No Collections Yet",
-                            message: "Create collections to organize your bookmarks by topic, series, or any way you like.",
-                            actionTitle: "Create First Collection"
-                        )
-                        .padding(.horizontal, 16)
+                        if bookmarkService.folders.isEmpty {
+                            // Empty Collections State
+                            EmptyStateCard(
+                                icon: "folder.fill",
+                                title: "No Collections Yet",
+                                message: "Create collections to organize your bookmarks by topic, series, or any way you like.",
+                                actionTitle: "Create First Collection",
+                                action: {
+                                    newFolderName = ""
+                                    isCreateFolderPresented = true
+                                }
+                            )
+                            .padding(.horizontal, 16)
+                        } else {
+                            VStack(spacing: 12) {
+                                ForEach(bookmarkService.folders) { folder in
+                                    BookmarkFolderRow(
+                                        folder: folder,
+                                        bookmarkCount: bookmarkService.bookmarks(inFolder: folder.id).count,
+                                        onTap: { selectedFolder = folder }
+                                    )
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
                     }
                     .padding(.bottom, 32)
                     
@@ -105,21 +141,36 @@ struct BookmarksView: View {
                             Spacer()
                             
                             Button("View All") {
-                                // View all action
+                                // For now, show the Bookmarks tab top section (no separate view yet)
                             }
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(themeManager.colors.primary)
                         }
                         .padding(.horizontal, 16)
                         
-                        // Empty Recent Bookmarks State
-                        EmptyStateCard(
-                            icon: "bookmark.fill",
-                            title: "No Bookmarks Yet",
-                            message: "Start reading and bookmark your favorite passages to see them here.",
-                            actionTitle: "Start Reading"
-                        )
-                        .padding(.horizontal, 16)
+                        let recent = bookmarkService.recentBookmarks(limit: 10)
+                        if recent.isEmpty {
+                            // Empty Recent Bookmarks State
+                            EmptyStateCard(
+                                icon: "bookmark.fill",
+                                title: "No Bookmarks Yet",
+                                message: "Start reading and bookmark your favorite passages to see them here.",
+                                actionTitle: "Start Reading",
+                                action: { }
+                            )
+                            .padding(.horizontal, 16)
+                        } else {
+                            VStack(spacing: 12) {
+                                ForEach(recent) { bookmark in
+                                    BookmarkRowCard(
+                                        bookmark: bookmark,
+                                        folderNameById: folderNameById,
+                                        onTap: { open(bookmark) }
+                                    )
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                        }
                     }
                     .padding(.bottom, 32)
                     
@@ -152,6 +203,38 @@ struct BookmarksView: View {
         }
         .scrollIndicators(.hidden)
         .background(themeManager.colors.background)
+        .alert("Create Folder", isPresented: $isCreateFolderPresented) {
+            TextField("Folder name", text: $newFolderName)
+            Button("Create") {
+                Task {
+                    do {
+                        _ = try await bookmarkService.createFolder(name: newFolderName)
+                    } catch {
+                        bookmarkService.lastErrorMessage = "Create folder failed: \(error.localizedDescription)"
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Folders help organize bookmarks. You can add bookmarks to multiple folders.")
+        }
+        .sheet(item: $selectedFolder) { folder in
+            FolderBookmarksSheet(folder: folder, onOpenBookmark: { open($0) })
+                .environmentObject(themeManager)
+                .environmentObject(bookmarkService)
+        }
+    }
+    
+    private var folderNameById: [String: String] {
+        Dictionary(uniqueKeysWithValues: bookmarkService.folders.map { ($0.id, $0.name) })
+    }
+    
+    private func open(_ bookmark: Bookmark) {
+        if bookmark.isDescription {
+            router.navigate(to: .descriptionReaderAt(bookId: bookmark.bookId, startTime: bookmark.startTime))
+        } else {
+            router.navigate(to: .readerAt(bookId: bookmark.bookId, chapterNumber: bookmark.chapterNumber, startTime: bookmark.startTime))
+        }
     }
 }
 
@@ -197,6 +280,7 @@ struct EmptyStateCard: View {
     let title: String
     let message: String
     let actionTitle: String
+    let action: () -> Void
     
     var body: some View {
         VStack(spacing: 16) {
@@ -220,7 +304,7 @@ struct EmptyStateCard: View {
                 .foregroundColor(themeManager.colors.textSecondary)
                 .multilineTextAlignment(.center)
             
-            Button(action: {}) {
+            Button(action: action) {
                 Text(actionTitle)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(themeManager.colors.primaryText)
@@ -240,6 +324,178 @@ struct EmptyStateCard: View {
             RoundedRectangle(cornerRadius: 16)
                 .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
         )
+    }
+}
+
+private struct BookmarkFolderRow: View {
+    @EnvironmentObject var themeManager: ThemeManager
+    let folder: BookmarkFolder
+    let bookmarkCount: Int
+    let onTap: () -> Void
+    
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(themeManager.colors.primary)
+                    .frame(width: 40, height: 40)
+                    .overlay {
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 18))
+                            .foregroundColor(themeManager.colors.primaryText)
+                    }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(folder.name)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(themeManager.colors.text)
+                    
+                    Text("\(bookmarkCount) bookmarks")
+                        .font(.system(size: 12))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(themeManager.colors.textSecondary)
+            }
+            .padding(16)
+            .background(themeManager.colors.card)
+            .cornerRadius(16)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+private struct BookmarkRowCard: View {
+    @EnvironmentObject var themeManager: ThemeManager
+    let bookmark: Bookmark
+    let folderNameById: [String: String]
+    let onTap: () -> Void
+    
+    private var folderNames: [String] {
+        bookmark.folderIds.compactMap { folderNameById[$0] }
+    }
+    
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(bookmark.text)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(themeManager.colors.text)
+                    .lineSpacing(16 * 0.35)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                HStack(spacing: 10) {
+                    Text(bookmark.isDescription ? "Summary" : "Chapter \(bookmark.chapterNumber ?? 0)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                    
+                    Text("at \(PlaybackTimeFormatter.string(from: bookmark.startTime))")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                    
+                    Spacer()
+                    
+                    if bookmark.starred {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(themeManager.colors.accent)
+                    }
+                }
+                
+                if !folderNames.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(folderNames, id: \.self) { name in
+                                Text(name)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(themeManager.colors.text)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(themeManager.colors.card)
+                                    .cornerRadius(12)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                                    )
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            .background(themeManager.colors.card)
+            .cornerRadius(16)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+private struct FolderBookmarksSheet: View {
+    @EnvironmentObject var themeManager: ThemeManager
+    @EnvironmentObject var bookmarkService: BookmarkService
+    @Environment(\.dismiss) private var dismiss
+    
+    let folder: BookmarkFolder
+    let onOpenBookmark: (Bookmark) -> Void
+    
+    private var bookmarks: [Bookmark] {
+        bookmarkService.bookmarks(inFolder: folder.id)
+    }
+    
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                themeManager.colors.background.ignoresSafeArea()
+                
+                ScrollView {
+                    VStack(spacing: 12) {
+                        if bookmarks.isEmpty {
+                            EmptyStateCard(
+                                icon: "bookmark.fill",
+                                title: "No Bookmarks in \(folder.name)",
+                                message: "Long-press the bookmark icon in the reader to add bookmarks to this folder.",
+                                actionTitle: "Close",
+                                action: { dismiss() }
+                            )
+                        } else {
+                            ForEach(bookmarks) { b in
+                                BookmarkRowCard(
+                                    bookmark: b,
+                                    folderNameById: Dictionary(uniqueKeysWithValues: bookmarkService.folders.map { ($0.id, $0.name) }),
+                                    onTap: {
+                                        dismiss()
+                                        onOpenBookmark(b)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .padding(.bottom, 32)
+                }
+            }
+            .navigationTitle(folder.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Close") { dismiss() }
+                        .foregroundColor(themeManager.colors.primary)
+                }
+            }
+        }
     }
 }
 

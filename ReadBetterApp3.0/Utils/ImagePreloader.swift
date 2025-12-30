@@ -25,8 +25,8 @@ class ImagePreloader {
     private lazy var imageSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 10 // Allow 10 concurrent connections per host
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForRequest = 10 // Reduced from 30 to fail faster on 404s
+        config.timeoutIntervalForResource = 30 // Reduced from 60
         config.requestCachePolicy = .returnCacheDataElseLoad // Use cache when available
         return URLSession(configuration: config)
     }()
@@ -38,7 +38,22 @@ class ImagePreloader {
     private func downsampleImage(data: Data, to size: CGSize, scale: CGFloat = UIScreen.main.scale) -> UIImage? {
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let imageSource = CGImageSourceCreateWithData(data as CFData, imageSourceOptions) else {
+            logger.warning("⚠️ Failed to create image source from data")
             return nil
+        }
+        
+        // Verify the image source has at least one image
+        let imageCount = CGImageSourceGetCount(imageSource)
+        guard imageCount > 0 else {
+            logger.warning("⚠️ Image source contains no images")
+            return nil
+        }
+        
+        // Check if the image is valid before attempting to create thumbnail
+        guard let imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] else {
+            logger.warning("⚠️ Failed to read image properties, image may be corrupted")
+            // Fallback: try to load full image instead
+            return UIImage(data: data)
         }
         
         let maxDimension = max(size.width, size.height) * scale
@@ -50,7 +65,9 @@ class ImagePreloader {
         ] as CFDictionary
         
         guard let downsampledImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, downsampleOptions) else {
-            return nil
+            logger.warning("⚠️ Failed to create thumbnail, falling back to full image decode")
+            // Fallback: try to load full image and resize manually
+            return UIImage(data: data)
         }
         
         return UIImage(cgImage: downsampledImage)
@@ -156,13 +173,33 @@ class ImagePreloader {
         
         // Load from network using custom session with higher connection limits
         do {
-            let (data, _) = try await imageSession.data(from: url)
+            let (data, response) = try await imageSession.data(from: url)
+            
+            // Validate response
+            if let httpResponse = response as? HTTPURLResponse {
+                guard httpResponse.statusCode == 200 else {
+                    // Only log non-404 errors (404s are common for missing covers)
+                    if httpResponse.statusCode != 404 {
+                        logger.warning("⚠️ Image load failed with status \(httpResponse.statusCode) for: \(url.absoluteString)")
+                    }
+                    return nil
+                }
+            }
+            
+            // Validate data size
+            guard data.count > 0 else {
+                logger.warning("⚠️ Image data is empty for: \(url.absoluteString)")
+                return nil
+            }
             
             // Decode image with downsampling if target size provided
             let image: UIImage?
             if let size = targetSize {
                 // Downsample during decode for efficiency
                 image = downsampleImage(data: data, to: size)
+                if image == nil {
+                    logger.warning("⚠️ Failed to downsample image from: \(url.absoluteString)")
+                }
                 if let img = image {
                     setCachedImage(img, for: cacheKey)
                 }
@@ -171,11 +208,16 @@ class ImagePreloader {
                 if getCachedImage(for: url.absoluteString) == nil {
                     if let fullImg = UIImage(data: data) {
                         setCachedImage(fullImg, for: url.absoluteString)
+                    } else {
+                        logger.warning("⚠️ Failed to decode full image from: \(url.absoluteString)")
                     }
                 }
             } else {
                 // Full resolution image
                 image = UIImage(data: data)
+                if image == nil {
+                    logger.warning("⚠️ Failed to decode image from: \(url.absoluteString)")
+                }
                 if let img = image {
                     setCachedImage(img, for: cacheKey)
                 }

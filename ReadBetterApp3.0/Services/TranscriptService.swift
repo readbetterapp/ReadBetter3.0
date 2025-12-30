@@ -147,31 +147,17 @@ class TranscriptService {
                 }
             }
         }
-        
-        // Sort words by start time (words with -1 will be at the end initially)
-        words.sort { word1, word2 in
-            // Words with valid timing first, sorted by time
-            if word1.start >= 0 && word2.start >= 0 {
-                return word1.start < word2.start
-            } else if word1.start >= 0 {
-                return true // word1 has timing, word2 doesn't
-            } else if word2.start >= 0 {
-                return false // word2 has timing, word1 doesn't
-            } else {
-                // Both need estimation - keep original order
-                return word1.index < word2.index
-            }
-        }
-        
+
+        // IMPORTANT: Keep `words` in transcript/text order.
+        // KaraokeEngine builds its own time-sorted index for playback, but sentence-to-word
+        // matching must be done in the same order as the transcript text. Sorting here by
+        // timing can reorder words (especially around estimated/unreliable timings) and
+        // causes cascading out-of-sync highlighting.
+
         // STEP 2.5: Estimate timing for words without timing data ("not-found-in-audio")
         estimateTimingForUnalignedWords(&words)
-        
-        // Re-sort after estimation (all should have valid timing now)
-        // IMPORTANT: We sort by time for lookup efficiency, but preserve original indices
-        words.sort { $0.start < $1.start }
-        
-        // DO NOT re-index! Preserve original JSON indices for sentence matching
-        // The index represents the position in the original JSON array, not the sorted position
+
+        // KaraokeEngine handles time-based lookup by sorting internally; we do NOT sort here.
         
         print("📊 TranscriptService: Found \(words.count) timed words")
         
@@ -193,10 +179,13 @@ class TranscriptService {
             // Remove surrounding quotes and punctuation, lowercase, trim whitespace.
             let quoteChars = CharacterSet(charactersIn: "\"“”‘’‚‛‹›«»")
             let punctuation = CharacterSet.punctuationCharacters.union(quoteChars)
+            // Include common "invisible" separators found in some transcript sources.
+            let extraWhitespace = CharacterSet(charactersIn: "\u{00A0}\u{200B}\u{2028}\u{2029}")
+            let whitespace = CharacterSet.whitespacesAndNewlines.union(extraWhitespace)
             return word
                 .lowercased()
                 .trimmingCharacters(in: punctuation)
-                .trimmingCharacters(in: .whitespaces)
+                .trimmingCharacters(in: whitespace)
         }
         
         // Helper to check if two normalized words match (handles contractions, etc.)
@@ -223,9 +212,15 @@ class TranscriptService {
         // First, estimate word distribution across sentences based on word count
         var sentenceWordCounts: [Int] = []
         var totalExpectedWords = 0
+
+        // Split tokens on spaces/newlines + common unicode separators (NBSP, line separators, ZWSP).
+        let tokenSeparators = CharacterSet.whitespacesAndNewlines
+            .union(CharacterSet(charactersIn: "\u{00A0}\u{200B}\u{2028}\u{2029}"))
         
         for sentenceText in sentenceTexts {
-            let wordCount = sentenceText.components(separatedBy: .whitespaces)
+            // Include newlines as separators too; some transcripts contain single line breaks
+            // inside a "sentence" block, which would otherwise produce tokens like "fit\nBack".
+            let wordCount = sentenceText.components(separatedBy: tokenSeparators)
                 .filter { !$0.isEmpty }
                 .map { normalizeWord($0) }
                 .filter { !$0.isEmpty }
@@ -250,31 +245,42 @@ class TranscriptService {
             wordsAssigned = wordEndIndex
         }
         
-        // Now assign words to sentences using a strict sequential, non-overlapping strategy
-        // Once a word is assigned, it is never reused by another sentence
-        var assignedWordIndices: Set<Int> = []
+        // Now assign words to sentences using a strict sequential, non-overlapping strategy.
+        // Critical constraints to prevent cascading drift:
+        // - Never allow a large forward "jump" to match a token (that can swallow future sentences).
+        // - Keep each sentence within a small budget: expectedWordCount + slack.
+        // KaraokeEngine sorts by time internally for playback, but sentence assignment must remain in text order.
         var wordCursor = 0
-        let lookahead = 20
+        let baseLookahead = 12
+        let sentenceSlack = 4     // allow a few extras for odd tokenization (quotes, hyphens, OCR quirks)
+        let maxJumpAllowed = 2    // never jump more than this many words ahead to match a token
         
         for (sentenceIndex, sentenceText) in sentenceTexts.enumerated() {
             var sentenceWordIndices: [Int] = []
             let expectedWordCount = sentenceWordCounts[sentenceIndex]
+            let maxWordsForSentence = max(0, expectedWordCount + sentenceSlack)
             
             let sentenceWords = sentenceText
-                .components(separatedBy: .whitespaces)
+                .components(separatedBy: tokenSeparators)
                 .filter { !$0.isEmpty }
                 .map { normalizeWord($0) }
             
             for sentenceWord in sentenceWords {
                 guard !sentenceWord.isEmpty else { continue }
+                if wordCursor >= words.count { break }
+                if sentenceWordIndices.count >= maxWordsForSentence { break }
                 
                 // Search in a small lookahead window for the best match
                 var bestMatch: Int? = nil
                 var bestScore: Double = 0
-                let searchEnd = min(wordCursor + lookahead, words.count)
+                
+                // Constrain search by remaining budget so we can't match something far ahead
+                // and accidentally consume the beginning of the next sentence.
+                let remainingBudget = maxWordsForSentence - sentenceWordIndices.count
+                let budgetLookahead = min(baseLookahead, max(3, remainingBudget + 1))
+                let searchEnd = min(wordCursor + budgetLookahead, words.count)
                 
                 for i in wordCursor..<searchEnd {
-                    if assignedWordIndices.contains(i) { continue }
                     let timingWord = normalizeWord(words[i].text)
                     
                     var score = 0.0
@@ -297,43 +303,55 @@ class TranscriptService {
                     }
                 }
                 
-                if let match = bestMatch, bestScore >= 20.0 {
-                    sentenceWordIndices.append(match)
-                    assignedWordIndices.insert(match)
-                    wordCursor = match + 1
-                } else {
-                    // Fallback: take the next unassigned word at cursor if available
-                    while wordCursor < words.count && assignedWordIndices.contains(wordCursor) {
+                // Accept only strong, near-cursor matches. Otherwise consume sequentially to preserve order.
+                if let match = bestMatch, bestScore >= 60.0, (match - wordCursor) <= maxJumpAllowed {
+                    // Optionally include the tiny skipped gap (<= maxJumpAllowed) if we have room.
+                    if match > wordCursor {
+                        for _ in wordCursor..<match {
+                            if sentenceWordIndices.count >= maxWordsForSentence { break }
+                            sentenceWordIndices.append(wordCursor)
+                            wordCursor += 1
+                        }
+                    }
+                    if sentenceWordIndices.count < maxWordsForSentence, wordCursor == match {
+                        sentenceWordIndices.append(wordCursor)
                         wordCursor += 1
                     }
-                    if wordCursor < words.count {
+                } else {
+                    // Strict fallback: consume next word to avoid drift.
+                    if sentenceWordIndices.count < maxWordsForSentence, wordCursor < words.count {
                         sentenceWordIndices.append(wordCursor)
-                        assignedWordIndices.insert(wordCursor)
                         wordCursor += 1
                     }
                 }
             }
             
-            // If still short, fill sequentially without overlap up to expectedWordCount
-            while sentenceWordIndices.count < expectedWordCount && wordCursor < words.count {
-                if !assignedWordIndices.contains(wordCursor) {
-                    sentenceWordIndices.append(wordCursor)
-                    assignedWordIndices.insert(wordCursor)
-                }
+            // If still short, fill sequentially up to expectedWordCount (bounded by maxWordsForSentence).
+            while sentenceWordIndices.count < expectedWordCount && sentenceWordIndices.count < maxWordsForSentence && wordCursor < words.count {
+                sentenceWordIndices.append(wordCursor)
                 wordCursor += 1
             }
             
-            // Trim any overshoot to avoid excessive assignments
-            if sentenceWordIndices.count > expectedWordCount + 5 {
-                sentenceWordIndices = Array(sentenceWordIndices.prefix(expectedWordCount + 5))
-            }
-            
-            // Calculate sentence timing from assigned words
+            // Calculate sentence timing from assigned words.
+            // Use min/max across the sentence to stay robust even if a few word timings are jittery/out-of-order.
             let sentenceStartTime: Double
             let sentenceEndTime: Double
-            if let firstIdx = sentenceWordIndices.first, let lastIdx = sentenceWordIndices.last {
-                sentenceStartTime = words[firstIdx].start
-                sentenceEndTime = words[lastIdx].end
+            if !sentenceWordIndices.isEmpty {
+                var minStart = Double.greatestFiniteMagnitude
+                var maxEnd = 0.0
+                for idx in sentenceWordIndices {
+                    minStart = min(minStart, words[idx].start)
+                    maxEnd = max(maxEnd, words[idx].end)
+                }
+                if minStart.isFinite, maxEnd.isFinite, maxEnd > minStart {
+                    sentenceStartTime = minStart
+                    sentenceEndTime = maxEnd
+                } else {
+                    // Fallback to time range estimate if computed bounds are invalid.
+                    let timeRange = sentenceTimeRanges[sentenceIndex]
+                    sentenceStartTime = timeRange.start
+                    sentenceEndTime = timeRange.end
+                }
             } else {
                 // Fallback to time range estimate
                 let timeRange = sentenceTimeRanges[sentenceIndex]
@@ -343,7 +361,7 @@ class TranscriptService {
             
             sentences.append(TranscriptData.Sentence(
                 text: sentenceText,
-                wordIndices: Array(Set(sentenceWordIndices)).sorted(),
+                wordIndices: sentenceWordIndices,
                 startTime: sentenceStartTime,
                 endTime: sentenceEndTime
             ))
@@ -352,89 +370,56 @@ class TranscriptService {
         // If any words remain unassigned, append them to the last sentence (without duplicates)
         if wordCursor < words.count, var last = sentences.last {
             var updated = last.wordIndices
-            for idx in wordCursor..<words.count where !assignedWordIndices.contains(idx) {
-                updated.append(idx)
-                assignedWordIndices.insert(idx)
-            }
-            if let firstIdx = updated.first, let lastIdx = updated.last {
+            for idx in wordCursor..<words.count { updated.append(idx) }
+            if !updated.isEmpty {
+                var minStart = last.startTime
+                var maxEnd = last.endTime
+                for idx in updated {
+                    minStart = min(minStart, words[idx].start)
+                    maxEnd = max(maxEnd, words[idx].end)
+                }
                 last = TranscriptData.Sentence(
                     text: last.text,
-                    wordIndices: Array(Set(updated)).sorted(),
-                    startTime: words[firstIdx].start,
-                    endTime: words[lastIdx].end
+                    wordIndices: updated,
+                    startTime: minStart,
+                    endTime: maxEnd
                 )
                 sentences[sentences.count - 1] = last
             }
         }
         
-        // Diagnostics: detect duplicates/missing coverage
-        var wordToSentence: [Int: Int] = [:]
-        var duplicates: [Int: [Int]] = [:]
-        for (sIdx, sentence) in sentences.enumerated() {
-            for wIdx in sentence.wordIndices {
-                if let existing = wordToSentence[wIdx] {
-                    duplicates[wIdx, default: []].append(contentsOf: [existing, sIdx])
-                } else {
-                    wordToSentence[wIdx] = sIdx
-                }
-            }
-        }
-        let missing = (0..<words.count).filter { wordToSentence[$0] == nil }
-        if !duplicates.isEmpty {
-            print("⚠️ TranscriptService: word→sentence duplicates (showing first 10): \(duplicates.prefix(10))")
-        }
-        if !missing.isEmpty {
-            print("⚠️ TranscriptService: missing word assignments (showing first 20): \(missing.prefix(20)), total \(missing.count)")
-        }
-        
-        // Fallback: ensure every word ends up in a sentence.
-        // Sometimes minor tokenization differences (line breaks, punctuation, hyphen splits)
-        // cause the matcher to skip a block of words. We recover by assigning any
-        // remaining words to the closest sentence by time.
-        if !missing.isEmpty {
-            var mutableSentences = sentences
-            
-            for wIdx in missing {
-                let word = words[wIdx]
-                
-                // Find the sentence whose time window contains the word start,
-                // otherwise choose the closest sentence by start time.
-                var targetSentenceIndex: Int?
-                var smallestDistance = Double.greatestFiniteMagnitude
-                
-                for (sIdx, sentence) in mutableSentences.enumerated() {
-                    if word.start >= sentence.startTime && word.end <= sentence.endTime {
-                        targetSentenceIndex = sIdx
-                        break
-                    }
-                    let distance = abs(word.start - sentence.startTime)
-                    if distance < smallestDistance {
-                        smallestDistance = distance
-                        targetSentenceIndex = sIdx
+        // Diagnostics: detect duplicates/missing coverage (pre-recovery).
+        func computeCoverage(_ sentences: [TranscriptData.Sentence]) -> (missing: [Int], duplicates: [Int: [Int]]) {
+            var wordToSentence: [Int: Int] = [:]
+            var duplicates: [Int: [Int]] = [:]
+            for (sIdx, sentence) in sentences.enumerated() {
+                for wIdx in sentence.wordIndices {
+                    if let existing = wordToSentence[wIdx] {
+                        duplicates[wIdx, default: []].append(contentsOf: [existing, sIdx])
+                    } else {
+                        wordToSentence[wIdx] = sIdx
                     }
                 }
-                
-                if let sIdx = targetSentenceIndex {
-                    var sentence = mutableSentences[sIdx]
-                    var updated = sentence.wordIndices
-                    updated.append(wIdx)
-                    updated = Array(Set(updated)).sorted()
-                    
-                    // Update the sentence timing to include the new word bounds
-                    let newStart = min(sentence.startTime, word.start)
-                    let newEnd = max(sentence.endTime, word.end)
-                    
-                    sentence = TranscriptData.Sentence(
-                        text: sentence.text,
-                        wordIndices: updated,
-                        startTime: newStart,
-                        endTime: newEnd
-                    )
-                    mutableSentences[sIdx] = sentence
-                }
             }
-            
-            sentences = mutableSentences
+            let missing = (0..<words.count).filter { wordToSentence[$0] == nil }
+            return (missing, duplicates)
+        }
+
+        let coverage = computeCoverage(sentences)
+        if !coverage.duplicates.isEmpty {
+            print("⚠️ TranscriptService: word→sentence duplicates (first 10): \(coverage.duplicates.prefix(10))")
+        }
+        if !coverage.missing.isEmpty {
+            print("❌ TranscriptService: missing word assignments (first 20): \(coverage.missing.prefix(20)), total \(coverage.missing.count)")
+            if let first = coverage.missing.first {
+                let lo = max(0, first - 5)
+                let hi = min(words.count - 1, first + 5)
+                let context = (lo...hi).map { i -> String in
+                    let w = words[i]
+                    return "\(i):\(w.text)@\(String(format: "%.2f", w.start))"
+                }.joined(separator: " | ")
+                print("🔎 TranscriptService: first missing context: \(context)")
+            }
         }
         
         let matchedWords = sentences.reduce(0) { $0 + $1.wordIndices.count }

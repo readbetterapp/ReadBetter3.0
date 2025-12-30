@@ -9,6 +9,7 @@ import SwiftUI
 
 struct LibraryView: View {
     @EnvironmentObject var themeManager: ThemeManager
+    @EnvironmentObject var ownershipService: BookOwnershipService
     @StateObject private var bookService = BookService.shared
     @State private var activeFilter: FilterType = .all
     @State private var scrollOffset: CGFloat = 0
@@ -20,7 +21,9 @@ struct LibraryView: View {
     }
     
     var filteredBooks: [Book] {
-        return bookService.books
+        // Only show owned books
+        let ownedBooks = bookService.books.filter { ownershipService.isBookOwned(bookId: $0.id) }
+        return ownedBooks
     }
     
     var body: some View {
@@ -66,7 +69,7 @@ struct LibraryView: View {
                             Button(action: {
                                 activeFilter = filter
                             }) {
-                                Text("\(filter.rawValue) (0)")
+                                Text("\(filter.rawValue) (\(filteredBooks.count))")
                                     .font(.system(size: 14, weight: activeFilter == filter ? .semibold : .regular))
                                     .foregroundColor(
                                         activeFilter == filter 
@@ -110,7 +113,7 @@ struct LibraryView: View {
                                     .font(.system(size: 18, weight: .semibold))
                                     .foregroundColor(themeManager.colors.text)
                                 
-                                Text("Start adding books to build your personal library")
+                                Text("Unlock books from the Search tab to add them to your library")
                                     .font(.system(size: 16))
                                     .foregroundColor(themeManager.colors.textSecondary)
                                     .multilineTextAlignment(.center)

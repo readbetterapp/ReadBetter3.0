@@ -6,11 +6,16 @@
 const {onRequest} = require("firebase-functions/v2/https");
 const {onSchedule} = require("firebase-functions/v2/scheduler");
 const {setGlobalOptions} = require("firebase-functions/v2");
+const {defineSecret} = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const axios = require("axios");
 const logger = require("firebase-functions/logger");
 const { libraryCache, chapterIndexCache } = require('./utils/cache');
 const { parseTranscript } = require('./utils/transcriptParser');
+const { processChapterExplainableTerms } = require('./utils/explainableTermsExtractor');
+
+// Define OpenAI API key as a secret
+const openaiApiKey = defineSecret("OPENAI_API_KEY");
 
 admin.initializeApp();
 
@@ -605,6 +610,764 @@ exports.autoScanBooks = onSchedule(
     }
   }
 );
+
+// ============================================================================
+// Explainable Terms Processing
+// ============================================================================
+
+/**
+ * HTTP Trigger: Manually process explainable terms for a chapter
+ * POST /processExplainableTerms/{bookId}/{chapterId}
+ */
+exports.processExplainableTerms = onRequest(
+  {
+    region: 'australia-southeast1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 300,
+    memory: '512MiB'
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const pathParts = extractPathParams(req);
+      const bookId = pathParts[0];
+      const chapterId = pathParts[1];
+      
+      if (!bookId || !chapterId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing bookId or chapterId. URL format: /processExplainableTerms/{bookId}/{chapterId}'
+        });
+      }
+      
+      logger.info(`📖 Manual trigger: Processing explainable terms for ${bookId}/${chapterId}`);
+      
+      // Set OpenAI API key from secret
+      process.env.OPENAI_API_KEY = openaiApiKey.value();
+      
+      const db = admin.firestore();
+      
+      // Get book data
+      const bookDoc = await db.collection('books').doc(bookId).get();
+      if (!bookDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error: `Book ${bookId} not found`
+        });
+      }
+      
+      const bookData = bookDoc.data();
+      const chapters = bookData.chapters || [];
+      
+      // Find the chapter
+      const chapter = chapters.find(ch => ch.id === chapterId);
+      if (!chapter) {
+        return res.status(404).json({
+          success: false,
+          error: `Chapter ${chapterId} not found in book ${bookId}`
+        });
+      }
+      
+      // Fetch the JSON file content
+      const jsonResponse = await axios.get(chapter.jsonUrl, { timeout: 30000 });
+      if (!jsonResponse.data) {
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to fetch chapter JSON'
+        });
+      }
+      
+      // Parse transcript
+      const transcriptData = parseTranscript(jsonResponse.data);
+      
+      // Process explainable terms
+      const terms = await processChapterExplainableTerms(
+        db,
+        bookId,
+        chapterId,
+        transcriptData.fullText,
+        transcriptData.words,
+        bookData.title || 'Unknown Book',
+        bookData.author || 'Unknown Author'
+      );
+      
+      res.json({
+        success: true,
+        message: `Processed ${terms.length} explainable terms`,
+        terms: terms
+      });
+      
+    } catch (error) {
+      logger.error('Error in processExplainableTerms:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/**
+ * HTTP Trigger: Get explainable terms for a chapter
+ * GET /getExplainableTerms/{bookId}/{chapterId}
+ */
+exports.getExplainableTerms = onRequest(
+  { region: 'australia-southeast1' },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const pathParts = extractPathParams(req);
+      const bookId = pathParts[0];
+      const chapterId = pathParts[1];
+      
+      if (!bookId || !chapterId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing bookId or chapterId. URL format: /getExplainableTerms/{bookId}/{chapterId}'
+        });
+      }
+      
+      const db = admin.firestore();
+      const docRef = db.collection('explainableTerms').doc(bookId)
+        .collection('chapters').doc(chapterId);
+      
+      const doc = await docRef.get();
+      
+      if (!doc.exists) {
+        return res.json({
+          success: true,
+          chapterId: chapterId,
+          bookId: bookId,
+          terms: [],
+          message: 'No explainable terms found. Terms are processed automatically when chapters are uploaded.'
+        });
+      }
+      
+      const data = doc.data();
+      res.json({
+        success: true,
+        chapterId: data.chapterId,
+        bookId: data.bookId,
+        terms: data.terms || [],
+        processedAt: data.processedAt?.toDate?.() || data.processedAt,
+        version: data.version
+      });
+      
+    } catch (error) {
+      logger.error('Error in getExplainableTerms:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/**
+ * HTTP Trigger: Process explainable terms for ALL chapters in a book
+ * POST /processBookExplainableTerms/{bookId}
+ */
+exports.processBookExplainableTerms = onRequest(
+  {
+    region: 'australia-southeast1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 540, // 9 minutes max
+    memory: '512MiB'
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const pathParts = extractPathParams(req, 1);
+      const bookId = pathParts[0];
+      
+      if (!bookId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing bookId. URL format: /processBookExplainableTerms/{bookId}'
+        });
+      }
+      
+      logger.info(`📚 Processing explainable terms for all chapters in book ${bookId}`);
+      
+      // Set OpenAI API key from secret
+      process.env.OPENAI_API_KEY = openaiApiKey.value();
+      
+      const db = admin.firestore();
+      
+      // Get book data
+      const bookDoc = await db.collection('books').doc(bookId).get();
+      if (!bookDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error: `Book ${bookId} not found`
+        });
+      }
+      
+      const bookData = bookDoc.data();
+      const chapters = bookData.chapters || [];
+      
+      if (chapters.length === 0) {
+        return res.json({
+          success: true,
+          message: 'No chapters found in book',
+          processed: 0
+        });
+      }
+      
+      const results = [];
+      
+      for (const chapter of chapters) {
+        try {
+          logger.info(`Processing chapter: ${chapter.id}`);
+          
+          // Fetch the JSON file content
+          const jsonResponse = await axios.get(chapter.jsonUrl, { timeout: 30000 });
+          if (!jsonResponse.data) {
+            results.push({ chapterId: chapter.id, status: 'error', error: 'Empty JSON' });
+            continue;
+          }
+          
+          // Parse transcript
+          const transcriptData = parseTranscript(jsonResponse.data);
+          
+          // Process explainable terms
+          const terms = await processChapterExplainableTerms(
+            db,
+            bookId,
+            chapter.id,
+            transcriptData.fullText,
+            transcriptData.words,
+            bookData.title || 'Unknown Book',
+            bookData.author || 'Unknown Author'
+          );
+          
+          results.push({ chapterId: chapter.id, status: 'success', termCount: terms.length });
+          
+          // Small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+        } catch (error) {
+          logger.error(`Error processing chapter ${chapter.id}:`, error);
+          results.push({ chapterId: chapter.id, status: 'error', error: error.message });
+        }
+      }
+      
+      const successCount = results.filter(r => r.status === 'success').length;
+      
+      res.json({
+        success: true,
+        message: `Processed ${successCount}/${chapters.length} chapters`,
+        results: results
+      });
+      
+    } catch (error) {
+      logger.error('Error in processBookExplainableTerms:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================================================
+// Explainable Terms Dashboard (Web UI)
+// ============================================================================
+
+/**
+ * Web Dashboard: View and manage explainable terms processing
+ * GET /explainableTermsDashboard
+ * 
+ * Shows all books/chapters and their processing status.
+ * Allows triggering processing for unprocessed chapters.
+ */
+exports.explainableTermsDashboard = onRequest(
+  {
+    region: 'australia-southeast1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 540,
+    memory: '512MiB'
+  },
+  async (req, res) => {
+    const db = admin.firestore();
+    
+    // Handle POST requests (trigger processing)
+    if (req.method === 'POST') {
+      setCorsHeaders(res);
+      
+      const action = req.body?.action || req.query.action;
+      const bookId = req.body?.bookId || req.query.bookId;
+      const chapterId = req.body?.chapterId || req.query.chapterId;
+      
+      // Set OpenAI API key from secret
+      process.env.OPENAI_API_KEY = openaiApiKey.value();
+      
+      if (action === 'processChapter' && bookId && chapterId) {
+        try {
+          // Get book data
+          const bookDoc = await db.collection('books').doc(bookId).get();
+          if (!bookDoc.exists) {
+            return res.status(404).json({ success: false, error: 'Book not found' });
+          }
+          
+          const bookData = bookDoc.data();
+          const chapter = (bookData.chapters || []).find(ch => ch.id === chapterId);
+          if (!chapter) {
+            return res.status(404).json({ success: false, error: 'Chapter not found' });
+          }
+          
+          // Fetch JSON and process
+          const jsonResponse = await axios.get(chapter.jsonUrl, { timeout: 30000 });
+          const transcriptData = parseTranscript(jsonResponse.data);
+          
+          const terms = await processChapterExplainableTerms(
+            db, bookId, chapterId, transcriptData.fullText, transcriptData.words,
+            bookData.title || 'Unknown', bookData.author || 'Unknown'
+          );
+          
+          return res.json({ success: true, termCount: terms.length });
+        } catch (error) {
+          return res.status(500).json({ success: false, error: error.message });
+        }
+      }
+      
+      if (action === 'processBook' && bookId) {
+        try {
+          const bookDoc = await db.collection('books').doc(bookId).get();
+          if (!bookDoc.exists) {
+            return res.status(404).json({ success: false, error: 'Book not found' });
+          }
+          
+          const bookData = bookDoc.data();
+          const chapters = bookData.chapters || [];
+          const results = [];
+          
+          for (const chapter of chapters) {
+            try {
+              const jsonResponse = await axios.get(chapter.jsonUrl, { timeout: 30000 });
+              const transcriptData = parseTranscript(jsonResponse.data);
+              
+              const terms = await processChapterExplainableTerms(
+                db, bookId, chapter.id, transcriptData.fullText, transcriptData.words,
+                bookData.title || 'Unknown', bookData.author || 'Unknown'
+              );
+              
+              results.push({ chapterId: chapter.id, status: 'success', termCount: terms.length });
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (error) {
+              results.push({ chapterId: chapter.id, status: 'error', error: error.message });
+            }
+          }
+          
+          return res.json({ success: true, results });
+        } catch (error) {
+          return res.status(500).json({ success: false, error: error.message });
+        }
+      }
+      
+      if (action === 'processAll') {
+        try {
+          const booksSnapshot = await db.collection('books').get();
+          const allResults = [];
+          
+          for (const bookDoc of booksSnapshot.docs) {
+            const bookData = bookDoc.data();
+            const bookId = bookDoc.id;
+            const chapters = bookData.chapters || [];
+            
+            for (const chapter of chapters) {
+              // Check if already processed with current version
+              const termsDoc = await db.collection('explainableTerms').doc(bookId)
+                .collection('chapters').doc(chapter.id).get();
+              
+              if (termsDoc.exists && termsDoc.data()?.version === '3.0') {
+                allResults.push({ bookId, chapterId: chapter.id, status: 'skipped', reason: 'already v3.0' });
+                continue;
+              }
+              
+              try {
+                const jsonResponse = await axios.get(chapter.jsonUrl, { timeout: 30000 });
+                const transcriptData = parseTranscript(jsonResponse.data);
+                
+                const terms = await processChapterExplainableTerms(
+                  db, bookId, chapter.id, transcriptData.fullText, transcriptData.words,
+                  bookData.title || 'Unknown', bookData.author || 'Unknown'
+                );
+                
+                allResults.push({ bookId, chapterId: chapter.id, status: 'success', termCount: terms.length });
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              } catch (error) {
+                allResults.push({ bookId, chapterId: chapter.id, status: 'error', error: error.message });
+              }
+            }
+          }
+          
+          return res.json({ success: true, results: allResults });
+        } catch (error) {
+          return res.status(500).json({ success: false, error: error.message });
+        }
+      }
+      
+      return res.status(400).json({ success: false, error: 'Invalid action' });
+    }
+    
+    // GET request - show dashboard HTML
+    try {
+      // Get all books
+      const booksSnapshot = await db.collection('books').get();
+      const books = [];
+      
+      for (const bookDoc of booksSnapshot.docs) {
+        const bookData = bookDoc.data();
+        const bookId = bookDoc.id;
+        const chapters = bookData.chapters || [];
+        
+        // Get explainable terms status for each chapter
+        const chapterStatuses = [];
+        for (const chapter of chapters) {
+          const termsDoc = await db.collection('explainableTerms').doc(bookId)
+            .collection('chapters').doc(chapter.id).get();
+          
+          chapterStatuses.push({
+            id: chapter.id,
+            title: chapter.title,
+            processed: termsDoc.exists,
+            termCount: termsDoc.exists ? (termsDoc.data()?.terms?.length || 0) : 0,
+            version: termsDoc.exists ? (termsDoc.data()?.version || '?') : null,
+            processedAt: termsDoc.exists ? termsDoc.data()?.processedAt?.toDate?.()?.toISOString?.() : null
+          });
+        }
+        
+        books.push({
+          id: bookId,
+          title: bookData.title || 'Unknown',
+          author: bookData.author || 'Unknown',
+          chapters: chapterStatuses
+        });
+      }
+      
+      // Sort books by title
+      books.sort((a, b) => a.title.localeCompare(b.title));
+      
+      // Generate HTML
+      const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Explainable Terms Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { 
+      text-align: center; 
+      margin-bottom: 30px; 
+      color: #ffd700;
+      font-size: 2.5em;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+    .stats {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      margin-bottom: 30px;
+      flex-wrap: wrap;
+    }
+    .stat-card {
+      background: rgba(255,255,255,0.1);
+      border-radius: 12px;
+      padding: 20px 30px;
+      text-align: center;
+      backdrop-filter: blur(10px);
+    }
+    .stat-card h3 { color: #ffd700; font-size: 2em; }
+    .stat-card p { color: #aaa; margin-top: 5px; }
+    .actions {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+    button {
+      background: linear-gradient(135deg, #ffd700 0%, #ff8c00 100%);
+      color: #1a1a2e;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-weight: bold;
+      cursor: pointer;
+      margin: 5px;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255,215,0,0.3); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    button.small { padding: 6px 12px; font-size: 0.85em; }
+    button.danger { background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%); }
+    .book {
+      background: rgba(255,255,255,0.05);
+      border-radius: 12px;
+      margin-bottom: 20px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .book-header {
+      background: rgba(255,255,255,0.1);
+      padding: 15px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+    .book-header:hover { background: rgba(255,255,255,0.15); }
+    .book-title { font-weight: bold; font-size: 1.1em; }
+    .book-author { color: #aaa; font-size: 0.9em; }
+    .book-stats { color: #ffd700; font-size: 0.9em; }
+    .chapters { padding: 0 20px 20px; display: none; }
+    .chapters.open { display: block; }
+    .chapter {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 15px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 8px;
+      margin-top: 10px;
+    }
+    .chapter-info { flex: 1; }
+    .chapter-title { font-weight: 500; }
+    .chapter-meta { font-size: 0.85em; color: #888; margin-top: 3px; }
+    .status { 
+      padding: 4px 10px; 
+      border-radius: 20px; 
+      font-size: 0.8em; 
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    .status.processed { background: #2ecc71; color: #000; }
+    .status.pending { background: #e74c3c; color: #fff; }
+    .status.outdated { background: #f39c12; color: #000; }
+    .loading { display: none; margin-left: 10px; }
+    .loading.show { display: inline; }
+    #toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #2ecc71;
+      color: #fff;
+      padding: 15px 25px;
+      border-radius: 8px;
+      display: none;
+      z-index: 1000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    #toast.error { background: #e74c3c; }
+    #toast.show { display: block; animation: slideIn 0.3s ease; }
+    @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📚 Explainable Terms Dashboard</h1>
+    
+    <div class="stats">
+      <div class="stat-card">
+        <h3>${books.length}</h3>
+        <p>Books</p>
+      </div>
+      <div class="stat-card">
+        <h3>${books.reduce((sum, b) => sum + b.chapters.length, 0)}</h3>
+        <p>Total Chapters</p>
+      </div>
+      <div class="stat-card">
+        <h3>${books.reduce((sum, b) => sum + b.chapters.filter(c => c.processed && c.version === '3.0').length, 0)}</h3>
+        <p>Processed (v3.0)</p>
+      </div>
+      <div class="stat-card">
+        <h3>${books.reduce((sum, b) => sum + b.chapters.filter(c => !c.processed || c.version !== '3.0').length, 0)}</h3>
+        <p>Pending/Outdated</p>
+      </div>
+    </div>
+    
+    <div class="actions">
+      <button onclick="processAllUnprocessed()">🚀 Process All Unprocessed</button>
+      <button onclick="location.reload()">🔄 Refresh</button>
+    </div>
+    
+    ${books.map(book => {
+      const processedCount = book.chapters.filter(c => c.processed && c.version === '3.0').length;
+      const totalCount = book.chapters.length;
+      return `
+      <div class="book">
+        <div class="book-header" onclick="toggleBook('${book.id}')">
+          <div>
+            <div class="book-title">${escapeHtml(book.title)}</div>
+            <div class="book-author">by ${escapeHtml(book.author)}</div>
+          </div>
+          <div style="display: flex; align-items: center;">
+            <div class="book-stats">${processedCount}/${totalCount} processed</div>
+            <button class="small" onclick="event.stopPropagation(); processBook('${book.id}')">Process Book</button>
+          </div>
+        </div>
+        <div class="chapters" id="chapters-${book.id}">
+          ${book.chapters.map(ch => {
+            const statusClass = !ch.processed ? 'pending' : (ch.version === '3.0' ? 'processed' : 'outdated');
+            const statusText = !ch.processed ? 'Pending' : (ch.version === '3.0' ? `v${ch.version} (${ch.termCount} terms)` : `v${ch.version} - needs update`);
+            return `
+            <div class="chapter" id="chapter-${ch.id.replace(/[^a-zA-Z0-9]/g, '_')}">
+              <div class="chapter-info">
+                <div class="chapter-title">${escapeHtml(ch.title || ch.id)}</div>
+                <div class="chapter-meta">${ch.processedAt ? 'Processed: ' + new Date(ch.processedAt).toLocaleString() : 'Not processed'}</div>
+              </div>
+              <span class="status ${statusClass}">${statusText}</span>
+              <button class="small" onclick="processChapter('${book.id}', '${ch.id}')">Process</button>
+              <span class="loading" id="loading-${ch.id.replace(/[^a-zA-Z0-9]/g, '_')}">⏳</span>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }).join('')}
+  </div>
+  
+  <div id="toast"></div>
+  
+  <script>
+    function toggleBook(bookId) {
+      const el = document.getElementById('chapters-' + bookId);
+      el.classList.toggle('open');
+    }
+    
+    function showToast(message, isError = false) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = isError ? 'error show' : 'show';
+      setTimeout(() => toast.className = '', 3000);
+    }
+    
+    async function processChapter(bookId, chapterId) {
+      const loadingId = 'loading-' + chapterId.replace(/[^a-zA-Z0-9]/g, '_');
+      const loading = document.getElementById(loadingId);
+      if (loading) loading.classList.add('show');
+      
+      try {
+        const response = await fetch(window.location.href, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'processChapter', bookId, chapterId })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          showToast('✅ Processed ' + data.termCount + ' terms');
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          showToast('❌ Error: ' + data.error, true);
+        }
+      } catch (error) {
+        showToast('❌ Error: ' + error.message, true);
+      } finally {
+        if (loading) loading.classList.remove('show');
+      }
+    }
+    
+    async function processBook(bookId) {
+      if (!confirm('Process all chapters in this book?')) return;
+      
+      showToast('⏳ Processing book... this may take a few minutes');
+      
+      try {
+        const response = await fetch(window.location.href, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'processBook', bookId })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          const successCount = data.results.filter(r => r.status === 'success').length;
+          showToast('✅ Processed ' + successCount + '/' + data.results.length + ' chapters');
+          setTimeout(() => location.reload(), 1500);
+        } else {
+          showToast('❌ Error: ' + data.error, true);
+        }
+      } catch (error) {
+        showToast('❌ Error: ' + error.message, true);
+      }
+    }
+    
+    async function processAllUnprocessed() {
+      if (!confirm('Process ALL unprocessed/outdated chapters across ALL books? This may take a while.')) return;
+      
+      showToast('⏳ Processing all books... this may take several minutes');
+      
+      try {
+        const response = await fetch(window.location.href, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'processAll' })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          const successCount = data.results.filter(r => r.status === 'success').length;
+          const skippedCount = data.results.filter(r => r.status === 'skipped').length;
+          showToast('✅ Processed ' + successCount + ', skipped ' + skippedCount);
+          setTimeout(() => location.reload(), 2000);
+        } else {
+          showToast('❌ Error: ' + data.error, true);
+        }
+      } catch (error) {
+        showToast('❌ Error: ' + error.message, true);
+      }
+    }
+  </script>
+</body>
+</html>`;
+
+      res.set('Content-Type', 'text/html');
+      res.send(html);
+      
+    } catch (error) {
+      logger.error('Error in explainableTermsDashboard:', error);
+      res.status(500).send('Error loading dashboard: ' + error.message);
+    }
+  }
+);
+
+/**
+ * Helper function to escape HTML
+ */
+function escapeHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
 // ============================================================================
 // API A: Library / Search API

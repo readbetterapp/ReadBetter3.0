@@ -10,10 +10,13 @@ import SwiftUI
 struct ProfileView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var authManager: AuthManager
     @State private var booksRead: Int = 0
     @State private var currentlyReading: Int = 0
     @State private var readingTime: String = "0h"
     @State private var isLoadingStats = false
+    @State private var isEditingName = false
+    @State private var editedName: String = ""
     
     var body: some View {
         ZStack {
@@ -22,6 +25,14 @@ struct ProfileView: View {
             
             ScrollView {
                 VStack(spacing: 0) {
+                    if let error = authManager.lastErrorMessage {
+                        Text(error)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color.red)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 8)
+                    }
+                    
                     // Header
                     HStack(spacing: 12) {
                         Button(action: {
@@ -67,6 +78,21 @@ struct ProfileView: View {
         .task {
             await loadUserStats()
         }
+        .alert("Edit Name", isPresented: $isEditingName) {
+            TextField("Your name", text: $editedName)
+            Button("Save") {
+                Task {
+                    do {
+                        try await authManager.updateDisplayName(editedName)
+                    } catch {
+                        authManager.lastErrorMessage = "Failed to update name: \(error.localizedDescription)"
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This name will appear on your profile and across the app.")
+        }
     }
     
     // MARK: - Profile Card
@@ -85,11 +111,11 @@ struct ProfileView: View {
                     }
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Reader")
+                    Text(authManager.displayName)
                         .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(themeManager.colors.text)
                     
-                    Text("Book enthusiast")
+                    Text(authSubtitle)
                         .font(.system(size: 14))
                         .foregroundColor(themeManager.colors.textSecondary)
                 }
@@ -220,15 +246,43 @@ struct ProfileView: View {
             Divider()
                 .background(themeManager.colors.divider)
             
-            // Logout
+            // Edit Name
             Button(action: {
-                handleLogout()
+                editedName = authManager.displayName
+                isEditingName = true
             }) {
                 settingsRow(
-                    icon: "arrow.right.square.fill",
-                    title: "Logout",
-                    color: Color.red
+                    icon: "person.crop.circle.badge.pencil",
+                    title: "Edit Name",
+                    color: themeManager.colors.text
                 )
+            }
+            
+            Divider()
+                .background(themeManager.colors.divider)
+            
+            if authManager.isAnonymous {
+                // Upgrade guest -> account
+                Button(action: {
+                    router.navigate(to: .login)
+                }) {
+                    settingsRow(
+                        icon: "person.badge.plus",
+                        title: "Sign In / Create Account",
+                        color: themeManager.colors.text
+                    )
+                }
+            } else {
+                // Logout (return to guest)
+                Button(action: {
+                    Task { await handleLogout() }
+                }) {
+                    settingsRow(
+                        icon: "arrow.right.square.fill",
+                        title: "Logout",
+                        color: Color.red
+                    )
+                }
             }
         }
         .background(themeManager.colors.card)
@@ -256,9 +310,19 @@ struct ProfileView: View {
     }
     
     // MARK: - Actions
-    private func handleLogout() {
-        // Navigate back to welcome/onboarding
-        router.replace(with: .welcome)
+    private var authSubtitle: String {
+        if authManager.isAnonymous {
+            return "Guest • not synced"
+        }
+        if let email = authManager.email, !email.isEmpty {
+            return email
+        }
+        return "Signed in"
+    }
+    
+    private func handleLogout() async {
+        await authManager.signOutToAnonymous()
+        router.navigateToRoot()
     }
     
     private func loadUserStats() async {

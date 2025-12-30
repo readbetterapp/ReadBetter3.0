@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Public library content
+    match /books/{bookId} {
+      allow read: if true;
+      // Writes are managed by backend/admin tooling
+      allow write: if false;
+      
+      // Chapter indexes (precomputed word timing data)
+      match /chapterIndexes/{chapterId} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+    
+    // Explainable terms (context-specific definitions for reader)
+    match /explainableTerms/{bookId} {
+      allow read: if true;
+      allow write: if false;
+      
+      match /chapters/{chapterId} {
+        allow read: if true;
+        allow write: if false;
+      }
+    }
+
+    // User-owned data
+    match /users/{userId} {
+      // Profile (names, email, etc.)
+      allow read, write: if isOwner(userId);
+
+      match /folders/{folderId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /bookmarks/{bookmarkId} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      match /readingProgress/{bookId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

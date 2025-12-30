@@ -7,19 +7,92 @@
 
 import SwiftUI
 import FirebaseCore
+import AVFoundation
+import GoogleSignIn
 
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
-        // Check if GoogleService-Info.plist exists before configuring Firebase
-        if Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist") != nil {
-            FirebaseApp.configure()
-            // Note: Book loading is handled in RootView to avoid duplicate calls
-        } else {
-            print("⚠️ GoogleService-Info.plist not found. Firebase features will be unavailable.")
-            print("📥 Download it from: https://console.firebase.google.com/")
-        }
+        
+        // CRITICAL: Configure audio session for background playback FIRST, before anything else.
+        // This must happen early, before any AVPlayer is created.
+        configureAudioSessionForBackgroundPlayback()
+        
+        // Configure Firebase with the correct plist based on bundle ID
+        configureFirebase()
+        
         return true
+    }
+    
+    private func configureFirebase() {
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        var plistName = "GoogleService-Info"
+        
+        // Select the correct plist based on bundle identifier
+        if bundleID.hasSuffix("-dev") {
+            plistName = "GoogleService-Info-Dev"
+        } else if bundleID.hasSuffix("-beta") {
+            plistName = "GoogleService-Info-Beta"
+        }
+        
+        // Check if the plist exists
+        guard let filePath = Bundle.main.path(forResource: plistName, ofType: "plist"),
+              let options = FirebaseOptions(contentsOfFile: filePath) else {
+            print("⚠️ \(plistName).plist not found. Firebase features will be unavailable.")
+            print("📥 Download it from: https://console.firebase.google.com/")
+            return
+        }
+        
+        FirebaseApp.configure(options: options)
+        print("✅ Firebase configured with \(plistName).plist for bundle: \(bundleID)")
+    }
+
+    // Google Sign-In callback URL handler
+    func application(_ app: UIApplication,
+                     open url: URL,
+                     options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
+        return GIDSignIn.sharedInstance.handle(url)
+    }
+    
+    private func configureAudioSessionForBackgroundPlayback() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            // Configure audio session for background playback.
+            // This MUST be set before any AVPlayer is created.
+            //
+            // NOTE: Some option combinations can throw -50 (invalid parameter) depending on device/OS.
+            // We prefer A2DP for Bluetooth headphones; `.allowBluetooth` can be rejected for `.playback`
+            // on some configurations because it targets HFP (two-way) routing.
+            do {
+                if #available(iOS 10.0, *) {
+                    try session.setCategory(
+                        .playback,
+                        mode: .spokenAudio,
+                        options: [.allowAirPlay, .allowBluetoothA2DP]
+                    )
+                } else {
+                    try session.setCategory(
+                        .playback,
+                        mode: .spokenAudio,
+                        options: [.allowAirPlay]
+                    )
+                }
+            } catch {
+                // Fallbacks to keep background playback working even if a mode/options combo is rejected.
+                print("⚠️ AVAudioSession launch config failed (will fallback): \(error)")
+                do {
+                    try session.setCategory(.playback)
+                } catch {
+                    // Last resort: plain playback, no options
+                    try session.setCategory(.playback, options: [])
+                }
+            }
+
+            try session.setActive(true)
+            print("✅ AVAudioSession configured for background playback at app launch. category=\(session.category.rawValue) mode=\(session.mode.rawValue)")
+        } catch {
+            print("❌ Failed to configure AVAudioSession at app launch: \(error)")
+        }
     }
 }
 

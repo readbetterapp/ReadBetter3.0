@@ -67,3 +67,6 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+
+# Xcode secrets (API keys, etc.)
+Secrets.xcconfig

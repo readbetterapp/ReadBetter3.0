@@ -10,12 +10,15 @@ import SwiftUI
 struct BookDetailsView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var readingProgressService: ReadingProgressService
     @StateObject private var bookService = BookService.shared
+    @StateObject private var ownershipService = BookOwnershipService.shared
     
     let bookId: String
     @State private var book: Book?
     @State private var isDescriptionExpanded = false
     @State private var isLoading = true
+    @State private var showUnlockModal = false
     
     var body: some View {
         ZStack {
@@ -37,6 +40,12 @@ struct BookDetailsView: View {
                         VStack(spacing: 24) {
                             // Book Cover and Info
                             bookCoverSection(book: book)
+                            
+                            // Reading progress (above Description, same width as cards below)
+                            if ownershipService.isBookOwned(bookId: book.id),
+                               let progress = readingProgressService.getProgress(for: book.id) {
+                                readingProgressSection(progress: progress)
+                            }
                             
                             // Description
                             if let description = book.description, !description.isEmpty {
@@ -72,7 +81,8 @@ struct BookDetailsView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 Button(action: {
-                    router.navigateBack()
+                    // Navigate back to tabs to ensure we don't end up at onboarding
+                    router.navigateBackToTabs()
                 }) {
                     Image(systemName: "arrow.left")
                         .font(.system(size: 18, weight: .medium))
@@ -85,6 +95,15 @@ struct BookDetailsView: View {
         }
         .task {
             await loadBook()
+        }
+        .overlay {
+            if showUnlockModal, let book = book {
+                UnlockBookModal(book: book, isPresented: $showUnlockModal)
+                    .environmentObject(themeManager)
+                    .environmentObject(ownershipService)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showUnlockModal)
+            }
         }
     }
     
@@ -124,13 +143,35 @@ struct BookDetailsView: View {
                                     book.descriptionAudioUrl != nil &&
                                     book.descriptionJsonUrl != nil
         let hasPlayableContent = hasChapters || hasDescriptionContent
-        let buttonLabel = hasChapters ? "Start Reading" : "Coming Soon"
-        let buttonIcon = hasChapters ? "play.fill" : "clock"
-        let buttonBackground = hasChapters ? themeManager.colors.primary : themeManager.colors.cardBorder
-        let buttonTextColor = hasChapters ? themeManager.colors.primaryText : themeManager.colors.textSecondary
+        let isOwned = ownershipService.isBookOwned(bookId: book.id)
+        let savedProgress = readingProgressService.getProgress(for: book.id)
+        let hasProgress = savedProgress != nil
+        
+        // Determine button state based on ownership and progress
+        let buttonLabel: String
+        let buttonIcon: String
+        let buttonBackground: Color
+        let buttonTextColor: Color
+        
+        if isOwned {
+            if hasProgress {
+                buttonLabel = "Continue Reading"
+                buttonIcon = "play.fill"
+            } else {
+                buttonLabel = hasChapters ? "Start Reading" : "Coming Soon"
+                buttonIcon = hasChapters ? "play.fill" : "clock"
+            }
+            buttonBackground = hasChapters ? themeManager.colors.primary : themeManager.colors.cardBorder
+            buttonTextColor = hasChapters ? themeManager.colors.primaryText : themeManager.colors.textSecondary
+        } else {
+            buttonLabel = "Unlock Book"
+            buttonIcon = "lock.fill"
+            buttonBackground = themeManager.colors.primary
+            buttonTextColor = themeManager.colors.primaryText
+        }
         
         return VStack(spacing: 24) {
-            // Book Cover
+            // Book Cover (no progress overlay)
             if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
                 AsyncImage(url: url) { image in
                     image
@@ -178,9 +219,22 @@ struct BookDetailsView: View {
             // Action Buttons
             VStack(spacing: 12) {
                 Button(action: {
-                    guard hasChapters else { return }
-                    // Navigate to reader (start from first chapter)
-                    router.navigate(to: .reader(bookId: book.id, chapterNumber: nil))
+                    if isOwned {
+                        guard hasChapters else { return }
+                        // Navigate to reader - use saved progress if available
+                        if let progress = savedProgress {
+                            router.navigate(to: .readerAt(
+                                bookId: book.id,
+                                chapterNumber: progress.currentChapterNumber,
+                                startTime: progress.currentTime
+                            ))
+                        } else {
+                            router.navigate(to: .reader(bookId: book.id, chapterNumber: nil))
+                        }
+                    } else {
+                        // Show unlock modal
+                        showUnlockModal = true
+                    }
                 }) {
                     HStack(spacing: 8) {
                         Image(systemName: buttonIcon)
@@ -195,7 +249,30 @@ struct BookDetailsView: View {
                     .clipShape(Capsule())
                     .opacity(hasChapters ? 1.0 : 0.4)
                 }
-                .disabled(!hasChapters)
+                .disabled(!isOwned && !hasChapters)
+                
+                // Sample button for non-owned books
+                if !isOwned && hasDescriptionContent {
+                    Button(action: {
+                        router.navigate(to: .descriptionReader(bookId: book.id))
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "eye.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                            Text("Read Sample")
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                        .foregroundColor(themeManager.colors.text)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(themeManager.colors.card)
+                        .overlay(
+                            Capsule()
+                                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                        )
+                        .clipShape(Capsule())
+                    }
+                }
                 
                 if !hasPlayableContent {
                     HStack(spacing: 8) {
@@ -280,17 +357,84 @@ struct BookDetailsView: View {
         )
     }
     
+    // MARK: - Reading Progress Section
+    private func readingProgressSection(progress: ReadingProgress) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Your Progress")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(themeManager.colors.text)
+                
+                Spacer()
+                
+                Text("\(Int(progress.percentComplete))%")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(themeManager.colors.primary)
+            }
+            
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(themeManager.colors.cardBorder)
+                        .frame(height: 8)
+                    
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(themeManager.colors.primary)
+                        .frame(width: geometry.size.width * CGFloat(progress.percentComplete / 100), height: 8)
+                }
+            }
+            .frame(height: 8)
+            
+            HStack {
+                Text("Chapter \(progress.currentChapterNumber): \(progress.currentChapterTitle)")
+                    .font(.system(size: 12))
+                    .foregroundColor(themeManager.colors.textSecondary)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                Text(progress.timeRemainingFormatted)
+                    .font(.system(size: 12))
+                    .foregroundColor(themeManager.colors.textSecondary)
+            }
+        }
+        .padding(16)
+        .background(themeManager.colors.card)
+        .cornerRadius(16)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+        )
+    }
+    
     // MARK: - Chapters Section
     private func chaptersSection(book: Book) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+        let progress = readingProgressService.getProgress(for: book.id)
+        let isOwned = ownershipService.isBookOwned(bookId: book.id)
+        let completed = Set(progress?.completedChapterIds ?? [])
+        
+        return VStack(alignment: .leading, spacing: 16) {
             Text("Chapters")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(themeManager.colors.text)
             
             ForEach(book.chapters.sorted(by: { $0.order < $1.order })) { chapter in
+                let cp = progress?.chapterProgressById[chapter.id]
+                let fraction: Double = {
+                    if completed.contains(chapter.id) { return 1.0 }
+                    guard let cp, cp.durationSeconds > 0 else { return 0 }
+                    return cp.fractionComplete
+                }()
+                
                 Button(action: {
-                    // Navigate to reader with specific chapter
-                    router.navigate(to: .reader(bookId: book.id, chapterNumber: chapter.order + 1))
+                    let isOwned = ownershipService.isBookOwned(bookId: book.id)
+                    if isOwned {
+                        // Navigate to reader with specific chapter
+                        router.navigate(to: .reader(bookId: book.id, chapterNumber: chapter.order + 1))
+                    } else {
+                        // Show unlock modal
+                        showUnlockModal = true
+                    }
                 }) {
                     HStack(spacing: 12) {
                         // Chapter number circle
@@ -310,9 +454,31 @@ struct BookDetailsView: View {
                                 .font(.system(size: 14, weight: .medium))
                                 .foregroundColor(themeManager.colors.text)
                             
-                            Text("Available")
-                                .font(.system(size: 12))
-                                .foregroundColor(themeManager.colors.textSecondary)
+                            if isOwned, progress != nil {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    GeometryReader { geometry in
+                                        ZStack(alignment: .leading) {
+                                            RoundedRectangle(cornerRadius: 3)
+                                                .fill(themeManager.colors.cardBorder)
+                                                .frame(height: 6)
+                                            
+                                            RoundedRectangle(cornerRadius: 3)
+                                                .fill(themeManager.colors.primary)
+                                                .frame(width: geometry.size.width * CGFloat(fraction), height: 6)
+                                        }
+                                    }
+                                    .frame(height: 6)
+                                    
+                                    Text("\(Int(fraction * 100))%")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(themeManager.colors.textSecondary)
+                                }
+                                .padding(.top, 2)
+                            } else {
+                                Text("Available")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(themeManager.colors.textSecondary)
+                            }
                         }
                         
                         Spacer()

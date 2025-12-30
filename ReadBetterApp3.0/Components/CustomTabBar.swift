@@ -9,40 +9,55 @@ import SwiftUI
 
 struct CustomTabBar: View {
     @EnvironmentObject var themeManager: ThemeManager
+    @ObservedObject var audioPlayer = OptimizedAudioPlayer.shared
     @Binding var selectedTab: TabContainerView.TabItem
     @Binding var showSearch: Bool
-    @State private var isCollapsed = false
+    @Binding var isCollapsed: Bool  // Expose collapsed state for mini player coordination
+    let onMiniPlayerTap: () -> Void
+    var animationNamespace: Namespace.ID? = nil  // Optional animation namespace for Spotify-style expand
     @State private var lastScrollY: CGFloat = 0
     @State private var currentTab: TabContainerView.TabItem = .home
     
+    private var showMiniPlayerCollapsed: Bool {
+        isCollapsed && audioPlayer.hasActiveSession
+    }
+    
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                // Main tab bar container - animates width
-                HStack {
-                    AnimatedTabBarContainer(
-                        isCollapsed: isCollapsed,
-                        selectedTab: $selectedTab,
-                        screenWidth: geometry.size.width
+            HStack(spacing: 0) {
+                // Main tab bar container (Home, Library, Bookmarks)
+                AnimatedTabBarContainer(
+                    isCollapsed: isCollapsed,
+                    selectedTab: $selectedTab,
+                    screenWidth: geometry.size.width
+                )
+                
+                // Collapsed Mini Player - separate bubble between Home and Search
+                if showMiniPlayerCollapsed {
+                    MiniPlayerCollapsedBubble(
+                        audioPlayer: audioPlayer,
+                        onTap: onMiniPlayerTap,
+                        animationNamespace: animationNamespace
                     )
-                    Spacer()
+                    .padding(.leading, 12)
+                    .padding(.trailing, 12)
+                    .transition(.scale.combined(with: .opacity))
                 }
-                .padding(.leading, 20)
+                
+                Spacer()
                 
                 // Search button - fixed position on the right
-                HStack {
-                    Spacer()
-                    GlassButton(
-                        icon: "magnifyingglass",
-                        isActive: selectedTab == .search,
-                        action: {
-                            selectedTab = .search
-                        }
-                    )
-                }
-                .padding(.trailing, 20)
+                GlassButton(
+                    icon: "magnifyingglass",
+                    isActive: selectedTab == .search,
+                    action: {
+                        selectedTab = .search
+                    }
+                )
             }
+            .padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
+            .animation(.spring(response: 0.35, dampingFraction: 0.85, blendDuration: 0), value: showMiniPlayerCollapsed)
         }
         .frame(height: 76)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TabBarScroll"))) { notification in
@@ -68,7 +83,7 @@ struct CustomTabBar: View {
         }
     }
     
-    private func handleScroll(scrollY: CGFloat) {
+    func handleScroll(scrollY: CGFloat) {
         let scrollDelta = scrollY - lastScrollY
         
         // Collapse when scrolling down past threshold

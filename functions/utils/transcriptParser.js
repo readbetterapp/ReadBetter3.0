@@ -152,6 +152,8 @@ function parseTranscript(json) {
   let wordCounter = 0;
 
   // Try flat words array first (most common format)
+  // CRITICAL: Use wordCounter that only increments for valid words (compacted indices)
+  // This MUST match iOS TranscriptService.swift which uses the same pattern
   if (Array.isArray(json.words) && json.words.length > 0) {
     if (typeof json.words[0] === 'object' && json.words[0] !== null) {
       // Array of objects

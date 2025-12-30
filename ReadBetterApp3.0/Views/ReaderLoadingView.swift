@@ -12,79 +12,131 @@ import AVFoundation
 struct ReaderLoadingView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var ownershipService: BookOwnershipService
+    @EnvironmentObject var readingProgressService: ReadingProgressService
+    
+    // Reference to shared audio player to check if book is already playing
+    @ObservedObject private var audioPlayer = OptimizedAudioPlayer.shared
     
     let bookId: String
     let chapterNumber: Int?
     let isDescription: Bool // Flag to indicate if loading description instead of chapter
+    let initialSeekTime: Double? // Optional seek time (e.g., from bookmarks)
     
     @State private var loadingState: ReaderLoadingState = .idle
     @State private var preloadedData: PreloadedReaderData?
     @State private var showReader = false
+    @State private var ownershipChecked = false
+    @State private var resolvedSeekTime: Double? = nil // Resolved seek time (from param or saved progress)
+    @State private var skipLoading = false // Flag to skip loading when audio is already playing
+    @State private var bookCoverUrl: String? = nil // Store book cover URL for display
     
-    init(bookId: String, chapterNumber: Int? = nil, isDescription: Bool = false) {
+    init(bookId: String, chapterNumber: Int? = nil, isDescription: Bool = false, initialSeekTime: Double? = nil) {
         self.bookId = bookId
         self.chapterNumber = chapterNumber
         self.isDescription = isDescription
+        self.initialSeekTime = initialSeekTime
     }
     
     var body: some View {
         ZStack {
-            themeManager.colors.background
-                .ignoresSafeArea()
-            
-            VStack(spacing: 32) {
-                // Book cover placeholder
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(themeManager.colors.card)
-                    .frame(width: 120, height: 180)
-                    .overlay {
-                        Image(systemName: "book.fill")
-                            .font(.system(size: 40))
-                            .foregroundColor(themeManager.colors.textSecondary)
-                    }
-                    .shadow(color: .black.opacity(0.3), radius: 8, x: 2, y: 4)
-                
-                VStack(spacing: 16) {
-                    // Loading text
-                    Text(loadingState.progressText)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(themeManager.colors.text)
+            // Only show loading UI if not skipping (i.e., not already playing)
+            if !skipLoading {
+                // Blurred background cover image
+                ZStack {
+                    themeManager.colors.background
+                        .ignoresSafeArea()
                     
-                    // Progress bar
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(themeManager.colors.card)
-                                .frame(height: 8)
-                            
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(themeManager.colors.primary)
-                                .frame(width: geometry.size.width * loadingState.progress, height: 8)
-                                .animation(.easeInOut(duration: 0.3), value: loadingState.progress)
+                    // Blurred cover background
+                    if let coverUrl = bookCoverUrl, let url = URL(string: coverUrl) {
+                        AsyncImage(url: url) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .ignoresSafeArea()
+                                .blur(radius: 50)
+                                .opacity(0.30)
+                        } placeholder: {
+                            EmptyView()
                         }
-                    }
-                    .frame(height: 8)
-                    .frame(maxWidth: 200)
-                    
-                    // Error state
-                    if case .error(let error) = loadingState {
-                        VStack(spacing: 12) {
-                            Text(error.localizedDescription)
-                                .font(.system(size: 14))
-                                .foregroundColor(.red)
-                                .multilineTextAlignment(.center)
-                            
-                            Button("Try Again") {
-                                Task {
-                                    await preloadData()
-                                }
-                            }
-                            .foregroundColor(themeManager.colors.primary)
-                        }
-                        .padding(.top, 8)
                     }
                 }
-                .padding(.horizontal, 40)
+                
+                VStack(spacing: 32) {
+                    // Book cover image
+                    if let coverUrl = bookCoverUrl, let url = URL(string: coverUrl) {
+                        AsyncImage(url: url) { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(themeManager.colors.card)
+                                .overlay {
+                                    Image(systemName: "book.fill")
+                                        .font(.system(size: 40))
+                                        .foregroundColor(themeManager.colors.textSecondary)
+                                }
+                        }
+                        .frame(width: 120, height: 180)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .shadow(color: .black.opacity(0.3), radius: 8, x: 2, y: 4)
+                    } else {
+                        // Fallback placeholder
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(themeManager.colors.card)
+                            .frame(width: 120, height: 180)
+                            .overlay {
+                                Image(systemName: "book.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(themeManager.colors.textSecondary)
+                            }
+                            .shadow(color: .black.opacity(0.3), radius: 8, x: 2, y: 4)
+                    }
+                    
+                    VStack(spacing: 16) {
+                        // Loading text
+                        Text(loadingState.progressText)
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(themeManager.colors.text)
+                        
+                        // Progress bar
+                        GeometryReader { geometry in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(themeManager.colors.card)
+                                    .frame(height: 8)
+                                
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(themeManager.colors.primary)
+                                    .frame(width: geometry.size.width * loadingState.progress, height: 8)
+                                    .animation(.easeInOut(duration: 0.3), value: loadingState.progress)
+                            }
+                        }
+                        .frame(height: 8)
+                        .frame(maxWidth: 200)
+                        
+                        // Error state
+                        if case .error(let error) = loadingState {
+                            VStack(spacing: 12) {
+                                Text(error.localizedDescription)
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.red)
+                                    .multilineTextAlignment(.center)
+                                
+                                Button("Try Again") {
+                                    Task {
+                                        await preloadData()
+                                    }
+                                }
+                                .foregroundColor(themeManager.colors.primary)
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    .padding(.horizontal, 40)
+                }
             }
         }
         .navigationBarBackButtonHidden(true)
@@ -103,22 +155,96 @@ struct ReaderLoadingView: View {
             }
         }
         .onAppear {
+            let targetChapter = chapterNumber ?? 1
+            
+            // Load book cover URL early for display
+            Task {
+                if let book = try? await BookService.shared.getBook(isbn: bookId) {
+                    await MainActor.run {
+                        self.bookCoverUrl = book.coverUrl
+                    }
+                }
+            }
+            
+            // OPTIMIZATION: Check if audio is already playing for this book/chapter
+            // If so, skip loading entirely and go directly to reader with existing data
+            if audioPlayer.hasActiveSession && audioPlayer.bookId == bookId {
+                if audioPlayer.chapterNumber == targetChapter || isDescription {
+                    if let existingData = audioPlayer.preloadedData {
+                        print("⚡ ReaderLoadingView: Audio already playing for this book/chapter - skipping load!")
+                        print("   Book: \(bookId), Chapter: \(targetChapter)")
+                        print("   Current playback time: \(audioPlayer.currentTime)s")
+                        
+                        // Use existing data - no need to reload anything
+                        self.preloadedData = existingData
+                        self.bookCoverUrl = existingData.book.coverUrl // Get cover from existing data
+                        self.resolvedSeekTime = nil // Don't seek - let it continue from current position
+                        self.ownershipChecked = true
+                        self.skipLoading = true // Flag to skip the .task
+                        self.loadingState = .ready(existingData)
+                        self.showReader = true
+                        return // Skip all other initialization
+                    }
+                }
+            }
+            
             // CRITICAL: Reset state when view appears to handle chapter navigation
             // This ensures state is fresh even if SwiftUI reuses the view instance
             loadingState = .idle
             preloadedData = nil
             showReader = false
+            ownershipChecked = false
+            
+            // Resolve seek time: use provided time, or fall back to saved progress
+            if let explicitTime = initialSeekTime {
+                resolvedSeekTime = explicitTime
+            } else if !isDescription, let savedProgress = readingProgressService.getProgress(for: bookId) {
+                // Check if we're loading the same chapter as saved progress
+                if savedProgress.currentChapterNumber == targetChapter {
+                    resolvedSeekTime = savedProgress.currentTime
+                    print("📍 ReaderLoadingView: Resuming from saved position \(savedProgress.currentTime)s in chapter \(targetChapter)")
+                } else {
+                    resolvedSeekTime = nil
+                }
+            } else {
+                resolvedSeekTime = nil
+            }
+            
+            // Check ownership first (description/sample is always allowed)
+            if !isDescription && !ownershipService.isBookOwned(bookId: bookId) {
+                // Book not owned - redirect back
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    router.navigateBack()
+                }
+            } else {
+                ownershipChecked = true
+            }
         }
         .task(id: "\(bookId)-\(chapterNumber ?? -1)-\(isDescription)") {
-            // Use task with id to ensure it runs when parameters change
-            // This handles chapter navigation where bookId might be same but chapterNumber changes
-            await preloadData()
+            // Skip if we're using existing preloaded data (audio already playing)
+            if skipLoading {
+                print("⚡ ReaderLoadingView: Skipping .task - using existing preloaded data")
+                return
+            }
+            
+            // Wait for ownership check
+            while !ownershipChecked {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+            }
+            
+            // Only proceed if owned (or description/sample)
+            if isDescription || ownershipService.isBookOwned(bookId: bookId) {
+                // Use task with id to ensure it runs when parameters change
+                // This handles chapter navigation where bookId might be same but chapterNumber changes
+                await preloadData()
+            }
         }
         .fullScreenCover(isPresented: $showReader) {
             if let data = preloadedData {
-                OptimizedReaderView(preloadedData: data)
+                OptimizedReaderView(preloadedData: data, initialSeekTime: resolvedSeekTime)
                     .environmentObject(themeManager)
                     .environmentObject(router)
+                    .transition(.move(edge: .trailing))
             }
         }
     }
@@ -130,6 +256,11 @@ struct ReaderLoadingView: View {
             loadingState = .loadingBook
             guard let book = try await BookService.shared.getBook(isbn: bookId) else {
                 throw ReaderLoadingError.bookNotFound
+            }
+            
+            // Store cover URL for display
+            await MainActor.run {
+                self.bookCoverUrl = book.coverUrl
             }
             
             // Get chapter or description
@@ -269,10 +400,15 @@ struct ReaderLoadingView: View {
                 throw ReaderLoadingError.emptyTranscript
             }
             
+            // Step 5: Preload explainable terms (non-blocking - runs in background)
+            // This fetches context-specific terms from Firestore for highlighting
+            ExplainableTermsService.shared.preloadTerms(for: bookId, chapterId: chapter.id)
+            
             print("✅ ReaderLoadingView: All data validated")
             print("   - \(totalWords) words indexed")
             print("   - \(sentences.count) sentences prepared")
             print("   - Audio duration: \(duration) seconds")
+            print("   - Explainable terms: preloading in background")
             
             // Create preloaded data with ALL indexed data + preloaded asset
             let preloadedData = PreloadedReaderData(

@@ -70,6 +70,10 @@ class KaraokeEngine: ObservableObject {
     private var lastLookupResult: Int? = nil // Stores original index (id), not array index
     private var currentWordArrayIndex: Int = 0 // Track current position for sequential fast-forward (Grok's approach)
     
+    // MARK: - Incremental tracking for lastSpokenWordIndex (avoids per-tick binary search)
+    private var lastSpokenArrayIndex: Int = -1
+    private var lastSpokenUpdateTime: Double = -1
+    
     // MARK: - Sentence-based gating
     private var currentSentenceIndex: Int? = nil
     
@@ -242,6 +246,20 @@ class KaraokeEngine: ObservableObject {
             } else {
                 // Log the failure for debugging
                 print("⚠️ KaraokeEngine: Could not find word '\(searchText)' (index \(wordIndex)) in sentence: \"\(sentenceText.prefix(50))...\"")
+                
+                // Extra debug context: show nearby mapped words to detect sentence→word drift quickly.
+                if let pos = sentence.wordIndices.firstIndex(of: wordIndex) {
+                    let lo = max(0, pos - 3)
+                    let hi = min(sentence.wordIndices.count - 1, pos + 3)
+                    let nearby = sentence.wordIndices[lo...hi].map { idx -> String in
+                        if let w = getWordByOriginalIndex(idx) {
+                            return "\(idx):\(w.text)"
+                        } else {
+                            return "\(idx):<filtered>"
+                        }
+                    }.joined(separator: " | ")
+                    print("🔎 KaraokeEngine: mapping context around \(wordIndex): \(nearby)")
+                }
             }
         }
         
@@ -631,47 +649,52 @@ class KaraokeEngine: ObservableObject {
             }
         }
         
-        // STEP 2.5: Update lastSpokenWordIndex to track all completed words
+        // STEP 2.5: Update lastSpokenWordIndex (incremental; binary-search only on seeks)
         // This should be the last word whose end time has passed (all words up to this are "spoken")
-        // This is separate from currentWordIndex which tracks the word currently being spoken
-        // Use binary search to efficiently find the last word that has ended
-        var newLastSpoken: Int? = nil
+        let timeDelta = lastSpokenUpdateTime >= 0 ? abs(time - lastSpokenUpdateTime) : .infinity
+        let didRewind = lastSpokenUpdateTime >= 0 && time + 0.001 < lastSpokenUpdateTime
+        let isSeekLikeJump = timeDelta > 0.5 || lastSpokenUpdateTime < 0 || didRewind
         
-        // Binary search for the last word whose end time <= current time
-        var left = 0
-        var right = indexedWords.count - 1
-        var bestMatch: Int? = nil
-        
-        while left <= right {
-            let mid = (left + right) / 2
-            let word = indexedWords[mid]
-            
-            // Validate word timing
-            guard word.end.isFinite && word.start.isFinite && word.start < word.end else {
-                // Invalid word - skip it
-                if time < word.start {
-                    right = mid - 1
-                } else {
-                    left = mid + 1
-                }
-                continue
+        if indexedWords.isEmpty {
+            if lastSpokenWordIndex != nil {
+                lastSpokenWordIndex = nil
             }
-            
-            if word.end <= time {
-                // This word has ended - it's a candidate, but check if there's a later one
-                bestMatch = word.id
-                left = mid + 1 // Look for later words that might also have ended
+        } else {
+            if isSeekLikeJump {
+                lastSpokenArrayIndex = findLastEndedWordArrayIndex(at: time)
             } else {
-                // This word hasn't ended yet - look earlier
-                right = mid - 1
+                // Normal playback progression: advance pointer while words end
+                if lastSpokenArrayIndex < -1 || lastSpokenArrayIndex >= indexedWords.count {
+                    lastSpokenArrayIndex = -1
+                }
+                
+                while (lastSpokenArrayIndex + 1) < indexedWords.count {
+                    let nextWord = indexedWords[lastSpokenArrayIndex + 1]
+                    
+                    // Skip invalid words
+                    guard nextWord.start.isFinite, nextWord.end.isFinite, nextWord.start < nextWord.end else {
+                        lastSpokenArrayIndex += 1
+                        continue
+                    }
+                    
+                    if nextWord.end <= time {
+                        lastSpokenArrayIndex += 1
+                    } else {
+                        break
+                    }
+                }
             }
-        }
-        
-        newLastSpoken = bestMatch
-        
-        // Only update if changed (prevents unnecessary SwiftUI updates)
-        if newLastSpoken != lastSpokenWordIndex {
-            lastSpokenWordIndex = newLastSpoken
+            
+            lastSpokenUpdateTime = time
+            
+            let newLastSpoken: Int? = (lastSpokenArrayIndex >= 0 && lastSpokenArrayIndex < indexedWords.count)
+                ? indexedWords[lastSpokenArrayIndex].id
+                : nil
+            
+            // Only update if changed (prevents unnecessary SwiftUI updates)
+            if newLastSpoken != lastSpokenWordIndex {
+                lastSpokenWordIndex = newLastSpoken
+            }
         }
         
         // STEP 3: Throttle ONLY progress updates (not word updates)
@@ -749,6 +772,8 @@ class KaraokeEngine: ObservableObject {
         lastLookupTime = -1
         lastLookupResult = nil
         currentWordArrayIndex = 0 // Reset to beginning for sequential fast-forward
+        lastSpokenArrayIndex = -1
+        lastSpokenUpdateTime = -1
         lastProgressUpdateTime = -1
         nextWordStartTime = 0
         progress = 0
@@ -762,6 +787,44 @@ class KaraokeEngine: ObservableObject {
         lastLookupTime = -1
         lastLookupResult = nil
         currentWordArrayIndex = 0 // Reset to force binary search path
+        lastSpokenArrayIndex = -1
+        lastSpokenUpdateTime = -1
+    }
+
+    // MARK: - Helpers
+    /// Returns the array index (in `indexedWords`) of the last word with endTime <= time.
+    /// Returns -1 if none have ended yet.
+    private func findLastEndedWordArrayIndex(at time: Double) -> Int {
+        guard !indexedWords.isEmpty else { return -1 }
+        
+        var left = 0
+        var right = indexedWords.count - 1
+        var bestMatchArrayIndex: Int = -1
+        
+        while left <= right {
+            let mid = (left + right) / 2
+            let word = indexedWords[mid]
+            
+            // Validate word timing
+            guard word.end.isFinite, word.start.isFinite, word.start < word.end else {
+                // Invalid word - move search window based on start time if possible
+                if time < word.start {
+                    right = mid - 1
+                } else {
+                    left = mid + 1
+                }
+                continue
+            }
+            
+            if word.end <= time {
+                bestMatchArrayIndex = mid
+                left = mid + 1
+            } else {
+                right = mid - 1
+            }
+        }
+        
+        return bestMatchArrayIndex
     }
 }
 
