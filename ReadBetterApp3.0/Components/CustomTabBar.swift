@@ -15,7 +15,6 @@ struct CustomTabBar: View {
     @Binding var isCollapsed: Bool  // Expose collapsed state for mini player coordination
     let onMiniPlayerTap: () -> Void
     var animationNamespace: Namespace.ID? = nil  // Optional animation namespace for Spotify-style expand
-    @State private var lastScrollY: CGFloat = 0
     @State private var currentTab: TabContainerView.TabItem = .home
     
     private var showMiniPlayerCollapsed: Bool {
@@ -32,19 +31,19 @@ struct CustomTabBar: View {
                     screenWidth: geometry.size.width
                 )
                 
-                // Collapsed Mini Player - separate bubble between Home and Search
+                // Collapsed Mini Player - expands to fill space between Home and Search
                 if showMiniPlayerCollapsed {
                     MiniPlayerCollapsedBubble(
                         audioPlayer: audioPlayer,
                         onTap: onMiniPlayerTap,
                         animationNamespace: animationNamespace
                     )
-                    .padding(.leading, 12)
-                    .padding(.trailing, 12)
+                    .frame(maxWidth: .infinity) // Expand to fill available space
+                    .padding(.horizontal, 12) // 12px gap on each side
                     .transition(.scale.combined(with: .opacity))
+                } else {
+                    Spacer()
                 }
-                
-                Spacer()
                 
                 // Search button - fixed position on the right
                 GlassButton(
@@ -60,18 +59,12 @@ struct CustomTabBar: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.85, blendDuration: 0), value: showMiniPlayerCollapsed)
         }
         .frame(height: 76)
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TabBarScroll"))) { notification in
-            if let scrollY = notification.userInfo?["scrollY"] as? CGFloat {
-                handleScroll(scrollY: scrollY)
-            }
-        }
         .onChange(of: selectedTab) { oldValue, newValue in
-            // Reset collapsed state and scroll position when switching tabs
+            // Reset collapsed state when switching tabs
             if oldValue != newValue {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.85, blendDuration: 0)) {
                     isCollapsed = false
                 }
-                lastScrollY = 0
                 currentTab = newValue
             }
         }
@@ -81,27 +74,6 @@ struct CustomTabBar: View {
                 selectedTab = .search
             }
         }
-    }
-    
-    func handleScroll(scrollY: CGFloat) {
-        let scrollDelta = scrollY - lastScrollY
-        
-        // Collapse when scrolling down past threshold
-        let shouldCollapse = scrollY > 50 && scrollDelta > 0 && !isCollapsed
-        // Expand when scrolling up or at top
-        let shouldExpand = (scrollY < 30 || scrollDelta < -10) && isCollapsed
-        
-        if shouldCollapse || shouldExpand {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85, blendDuration: 0)) {
-                if shouldCollapse {
-                    isCollapsed = true
-                } else if shouldExpand {
-                    isCollapsed = false
-                }
-            }
-        }
-        
-        lastScrollY = scrollY
     }
 }
 
@@ -120,60 +92,80 @@ struct AnimatedTabBarContainer: View {
     }
     
     private var tabExpandedWidth: CGFloat {
-        fullWidth / 3.0  // Evenly divide among 3 tabs
+        fullWidth / 4.0  // Evenly divide among 4 tabs
     }
     
     private var homeTabCollapsedWidth: CGFloat {
         40
     }
     
-    var body: some View {
-        GlassMorphicView {
-            HStack(spacing: 0) {
-                // Home Tab
+    private var tabBarContent: some View {
+        HStack(spacing: 0) {
+            // Home Tab
+            TabBarButton(
+                icon: "house.fill",
+                label: "Home",
+                isSelected: selectedTab == .home,
+                width: isCollapsed ? homeTabCollapsedWidth : tabExpandedWidth,
+                showLabel: !isCollapsed,
+                action: {
+                    selectedTab = .home
+                }
+            )
+            
+            // Library Tab
+            if !isCollapsed {
                 TabBarButton(
-                    icon: "house.fill",
-                    label: "Home",
-                    isSelected: selectedTab == .home,
-                    width: isCollapsed ? homeTabCollapsedWidth : tabExpandedWidth,
-                    showLabel: !isCollapsed,
+                    icon: "books.vertical.fill",
+                    label: "Library",
+                    isSelected: selectedTab == .library,
+                    width: tabExpandedWidth,
+                    showLabel: true,
                     action: {
-                        selectedTab = .home
+                        selectedTab = .library
                     }
                 )
-                
-                // Library Tab
-                if !isCollapsed {
-                    TabBarButton(
-                        icon: "books.vertical.fill",
-                        label: "Library",
-                        isSelected: selectedTab == .library,
-                        width: tabExpandedWidth,
-                        showLabel: true,
-                        action: {
-                            selectedTab = .library
-                        }
-                    )
-                    .transition(.opacity.combined(with: .scale))
-                }
-                
-                // Bookmarks Tab
-                if !isCollapsed {
-                    TabBarButton(
-                        icon: "bookmark.fill",
-                        label: "Bookmarks",
-                        isSelected: selectedTab == .bookmarks,
-                        width: tabExpandedWidth,
-                        showLabel: true,
-                        action: {
-                            selectedTab = .bookmarks
-                        }
-                    )
-                    .transition(.opacity.combined(with: .scale))
-                }
+                .transition(.opacity.combined(with: .scale))
+            }
+            
+            // Bookmarks Tab
+            if !isCollapsed {
+                TabBarButton(
+                    icon: "bookmark.fill",
+                    label: "Bookmarks",
+                    isSelected: selectedTab == .bookmarks,
+                    width: tabExpandedWidth,
+                    showLabel: true,
+                    action: {
+                        selectedTab = .bookmarks
+                    }
+                )
+                .transition(.opacity.combined(with: .scale))
             }
         }
-        .frame(width: isCollapsed ? collapsedWidth : fullWidth, height: 76)
+    }
+    
+    private var glassTintColor: Color {
+        themeManager.isDarkMode 
+            ? Color(white: 0.3).opacity(0.4) // Uniform mid-grey for dark mode
+            : Color(white: 0.5).opacity(0.3) // Subtle grey for light mode
+    }
+    
+    var body: some View {
+        Group {
+            if #available(iOS 26.0, *) {
+                // iOS 26+ Liquid Glass effect
+                tabBarContent
+                    .frame(width: isCollapsed ? collapsedWidth : fullWidth, height: 76)
+                    .glassEffect(.regular.tint(glassTintColor), in: RoundedRectangle(cornerRadius: 38))
+            } else {
+                // Fallback for iOS 25 and earlier
+                GlassMorphicView {
+                    tabBarContent
+                }
+                .frame(width: isCollapsed ? collapsedWidth : fullWidth, height: 76)
+            }
+        }
         .animation(.spring(response: 0.35, dampingFraction: 0.85, blendDuration: 0), value: isCollapsed)
         .animation(.spring(response: 0.35, dampingFraction: 0.85, blendDuration: 0), value: selectedTab)
     }
@@ -212,14 +204,30 @@ struct GlassButton: View {
     let isActive: Bool
     let action: () -> Void
     
+    private var glassTintColor: Color {
+        themeManager.isDarkMode 
+            ? Color(white: 0.3).opacity(0.4) // Uniform mid-grey for dark mode
+            : Color(white: 0.5).opacity(0.3) // Subtle grey for light mode
+    }
+    
     var body: some View {
         Button(action: action) {
-            GlassMorphicView {
+            if #available(iOS 26.0, *) {
+                // iOS 26+ Liquid Glass effect
                 Image(systemName: icon)
                     .font(.system(size: 24))
                     .foregroundColor(isActive ? Color(hex: "#FF383C") : themeManager.colors.text)
+                    .frame(width: 76, height: 76)
+                    .glassEffect(.regular.tint(glassTintColor), in: RoundedRectangle(cornerRadius: 38))
+            } else {
+                // Fallback for iOS 25 and earlier
+                GlassMorphicView {
+                    Image(systemName: icon)
+                        .font(.system(size: 24))
+                        .foregroundColor(isActive ? Color(hex: "#FF383C") : themeManager.colors.text)
+                }
+                .frame(width: 76, height: 76)
             }
-            .frame(width: 76, height: 76)
         }
     }
 }

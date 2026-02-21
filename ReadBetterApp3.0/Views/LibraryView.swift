@@ -12,7 +12,6 @@ struct LibraryView: View {
     @EnvironmentObject var ownershipService: BookOwnershipService
     @StateObject private var bookService = BookService.shared
     @State private var activeFilter: FilterType = .all
-    @State private var scrollOffset: CGFloat = 0
     
     enum FilterType: String, CaseIterable {
         case all = "All Books"
@@ -27,154 +26,167 @@ struct LibraryView: View {
     }
     
     var body: some View {
-        VStack(spacing: 0) {
+        ScrollView {
+            LazyVStack(spacing: 0, pinnedViews: []) {
                 // Header
                 HStack {
                     Text("My Library")
-                        .font(.system(size: 24, weight: .semibold))
+                        .font(.system(size: 28, weight: .semibold))
                         .foregroundColor(themeManager.colors.text)
-                    
                     Spacer()
-                    
-                    // View toggle buttons
-                    HStack(spacing: 0) {
-                        Button(action: {}) {
-                            Image(systemName: "square.grid.3x3.fill")
-                                .font(.system(size: 16))
-                                .foregroundColor(themeManager.colors.primaryText)
-                                .frame(width: 32, height: 32)
-                                .background(themeManager.colors.primary)
-                                .cornerRadius(4)
-                        }
-                        
-                        Button(action: {}) {
-                            Image(systemName: "list.bullet")
-                                .font(.system(size: 16))
-                                .foregroundColor(themeManager.colors.textSecondary)
-                                .frame(width: 32, height: 32)
-                        }
-                    }
-                    .padding(4)
-                    .background(themeManager.colors.card)
-                    .cornerRadius(8)
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
                 .padding(.bottom, 20)
-            
-                // Filter Buttons
+                
+                // Filter buttons
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         ForEach(FilterType.allCases, id: \.self) { filter in
-                            Button(action: {
-                                activeFilter = filter
-                            }) {
-                                Text("\(filter.rawValue) (\(filteredBooks.count))")
-                                    .font(.system(size: 14, weight: activeFilter == filter ? .semibold : .regular))
-                                    .foregroundColor(
-                                        activeFilter == filter 
-                                            ? themeManager.colors.primaryText 
-                                            : themeManager.colors.textSecondary
-                                    )
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        activeFilter == filter 
-                                            ? themeManager.colors.primary 
-                                            : themeManager.colors.card
-                                    )
-                                    .cornerRadius(20)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 20)
-                                            .strokeBorder(
-                                                activeFilter == filter 
-                                                    ? Color.clear 
-                                                    : themeManager.colors.cardBorder,
-                                                lineWidth: 1
-                                            )
-                                    )
-                            }
+                            FilterButton(
+                                title: filter.rawValue,
+                                isActive: activeFilter == filter,
+                                action: { activeFilter = filter }
+                            )
                         }
                     }
                     .padding(.horizontal, 16)
                 }
-                .padding(.bottom, 20)
+                .padding(.bottom, 24)
                 
-                // Books Grid - ScrollView fills remaining space
-                ScrollView {
-                    VStack {
-                        if filteredBooks.isEmpty {
-                            VStack(spacing: 16) {
-                                Image(systemName: "books.vertical.fill")
-                                    .font(.system(size: 64))
-                                    .foregroundColor(themeManager.colors.textSecondary)
-                                
-                                Text("Your library is empty")
-                                    .font(.system(size: 18, weight: .semibold))
-                                    .foregroundColor(themeManager.colors.text)
-                                
-                                Text("Unlock books from the Search tab to add them to your library")
-                                    .font(.system(size: 16))
-                                    .foregroundColor(themeManager.colors.textSecondary)
-                                    .multilineTextAlignment(.center)
-                            }
-                            .padding(.horizontal, 32)
-                            .padding(.vertical, 60)
-                            .frame(maxWidth: .infinity)
-                            .padding(.bottom, 120)
-                        } else {
-                            LazyVGrid(columns: [
-                                GridItem(.flexible(), spacing: 16),
-                                GridItem(.flexible(), spacing: 16)
-                            ], spacing: 16) {
-                                ForEach(filteredBooks) { book in
-                                    BookCard(book: book)
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 120)
+                // Books Grid
+                if filteredBooks.isEmpty {
+                    EmptyLibraryView()
+                        .padding(.top, 60)
+                } else {
+                    LazyVGrid(columns: [
+                        GridItem(.flexible(), spacing: 16),
+                        GridItem(.flexible(), spacing: 16)
+                    ], spacing: 20) {
+                        ForEach(filteredBooks) { book in
+                            BookCard(book: book)
                         }
                     }
-                    .overlay(
-                        GeometryReader { geometry in
-                            Color.clear
-                                .preference(
-                                    key: ScrollOffsetPreferenceKey.self,
-                                    value: geometry.frame(in: .named("scroll")).minY
-                                )
-                        }
-                    )
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 100)
                 }
-                .coordinateSpace(name: "scroll")
-                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
-                    let offset = -value // Invert to get positive scroll down value
-                    scrollOffset = offset
-                    
-                    // Send notification with scroll position
-                    NotificationCenter.default.post(
-                        name: NSNotification.Name("TabBarScroll"),
-                        object: nil,
-                        userInfo: ["scrollY": max(0, offset)]
-                    )
-                }
-                .scrollIndicators(.hidden)
-        }
-        .background(themeManager.colors.background)
-        .refreshable {
-            // Pull to refresh - force refresh to get latest data
-            print("📚 LibraryView: Refreshing books...")
-            do {
-                try await bookService.fetchBooks(forceRefresh: true)
-            } catch {
-                print("❌ LibraryView: Error refreshing books: \(error)")
+                
+                // Extra space for tab bar collapse
+                Spacer()
+                    .frame(height: 1000)
             }
+        }
+        .scrollIndicators(.hidden)
+        .background {
+            ZStack {
+                themeManager.colors.background
+                
+                // Bottom edge fade - sits behind content and tab bar
+                VStack {
+                    Spacer()
+                    
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.clear, location: 0.0),
+                            .init(color: Color.black.opacity(0.05), location: 0.15),
+                            .init(color: Color.black.opacity(0.15), location: 0.35),
+                            .init(color: Color.black.opacity(0.30), location: 0.55),
+                            .init(color: Color.black.opacity(0.50), location: 0.75),
+                            .init(color: Color.black.opacity(0.65), location: 0.88),
+                            .init(color: Color.black.opacity(0.80), location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 120)
+                    .ignoresSafeArea(edges: .bottom)
+                }
+            }
+            .ignoresSafeArea()
         }
     }
 }
 
-// Book model moved to Models/Book.swift
+// MARK: - Filter Button
+struct FilterButton: View {
+    @EnvironmentObject var themeManager: ThemeManager
+    let title: String
+    let isActive: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(isActive ? themeManager.colors.primaryText : themeManager.colors.textSecondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background {
+                    if isActive {
+                        Capsule()
+                            .fill(themeManager.colors.primary)
+                    } else {
+                        if #available(iOS 26.0, *) {
+                            Capsule()
+                                .fill(Color.clear)
+                                .glassEffect(in: Capsule())
+                        } else {
+                            Capsule()
+                                .fill(themeManager.colors.card)
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                                )
+                        }
+                    }
+                }
+                .shadow(color: Color.black.opacity(isActive ? 0 : 0.12), radius: 8, x: 0, y: 4)
+        }
+    }
+}
 
-// Book Card Component
+// MARK: - Empty Library View
+struct EmptyLibraryView: View {
+    @EnvironmentObject var themeManager: ThemeManager
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "books.vertical")
+                .font(.system(size: 60))
+                .foregroundColor(themeManager.colors.textSecondary)
+            
+            Text("No Books in Your Library")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(themeManager.colors.text)
+            
+            Text("Start exploring and add books to your collection")
+                .font(.system(size: 14))
+                .foregroundColor(themeManager.colors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.vertical, 40)
+        .padding(.horizontal, 40)
+        .frame(maxWidth: .infinity)
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.clear)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
+        .padding(.horizontal, 16)
+    }
+}
+
+// MARK: - Book Card Component
 struct BookCard: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
@@ -215,7 +227,7 @@ struct BookCard: View {
                                 .foregroundColor(themeManager.colors.textSecondary)
                         }
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 0))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.3), radius: 4, x: 2, y: 3)
                 
                 // Title
@@ -239,14 +251,22 @@ struct BookCard: View {
                 }
             }
             .padding(12)
-            .background(themeManager.colors.card)
-            .cornerRadius(16)
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
-            )
+            .background {
+                if #available(iOS 26.0, *) {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(Color.clear)
+                        .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                } else {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(themeManager.colors.card)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                        )
+                }
+            }
+            .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
         }
         .buttonStyle(PlainButtonStyle())
     }
 }
-

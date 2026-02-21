@@ -47,7 +47,6 @@ final class ExplainableTermsService {
     func getTerms(for bookId: String, chapterId: String) async -> ChapterExplainableTerms {
         // Check cache first
         if let cached = cacheQueue.sync(execute: { cache[chapterId] }) {
-            logger.info("📚 ExplainableTerms cache hit for \(chapterId)")
             return cached
         }
         
@@ -103,12 +102,6 @@ final class ExplainableTermsService {
         cacheQueue.sync {
             wordIndexCache[chapterId] = lookup
         }
-        
-        logger.info("📚 Built word index lookup: \(lookup.count) word indices for \(terms.terms.count) terms")
-        
-        // Debug: show which terms were matched
-        let matchedTerms = Set(lookup.values.map { $0.term })
-        logger.info("📚 Matched terms: \(matchedTerms.joined(separator: ", "))")
         
         return Set(lookup.keys)
     }

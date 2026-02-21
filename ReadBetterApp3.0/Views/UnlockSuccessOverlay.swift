@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Kingfisher
 
 struct UnlockSuccessOverlay: View {
     @EnvironmentObject var themeManager: ThemeManager
@@ -25,88 +26,98 @@ struct UnlockSuccessOverlay: View {
             Color.black.opacity(0.9)
                 .ignoresSafeArea()
             
-            // Content
-            VStack(spacing: 24) {
-                // Glow effect behind book
-                Circle()
-                    .fill(Color(red: 0.96, green: 0.82, blue: 0.25)) // Gold color
-                    .frame(width: 200, height: 200)
-                    .opacity(glowOpacity * 0.3)
-                    .scaleEffect(glowOpacity * 0.5 + 0.5)
-                    .blur(radius: 20)
+            // Content - Centered with slight upward bias
+            VStack(spacing: 0) {
+                Spacer()
+                    .frame(maxHeight: 60) // Small top spacer
                 
-                // Book Cover
-                if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
-                    AsyncImage(url: url) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(themeManager.colors.card)
-                            .overlay {
-                                Image(systemName: "book.fill")
-                                    .font(.system(size: 40))
-                                    .foregroundColor(themeManager.colors.textSecondary)
-                            }
-                    }
-                    .frame(width: 140, height: 200)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .shadow(color: Color(red: 0.96, green: 0.82, blue: 0.25).opacity(0.5), radius: 20, x: 0, y: 0)
-                    .overlay(alignment: .bottomTrailing) {
-                        // Check badge
-                        ZStack {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 48, height: 48)
-                            
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 28))
-                                .foregroundColor(.white)
+                VStack(spacing: 24) {
+                    // Book Cover with glow effect behind it
+                    ZStack {
+                        // Glow effect BEHIND book (same position)
+                        Circle()
+                            .fill(Color(red: 0.96, green: 0.82, blue: 0.25))
+                            .frame(width: 220, height: 220)
+                            .opacity(glowOpacity * 0.4)
+                            .blur(radius: 50)
+                        
+                        // Book Cover
+                        if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
+                            KFImage(url)
+                                .placeholder {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(themeManager.colors.card)
+                                        .overlay {
+                                            Image(systemName: "book.fill")
+                                                .font(.system(size: 40))
+                                                .foregroundColor(themeManager.colors.textSecondary)
+                                        }
+                                }
+                                .fade(duration: 0.2)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 140, height: 200)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
+                                .shadow(color: Color(red: 0.96, green: 0.82, blue: 0.25).opacity(0.5), radius: 20, x: 0, y: 0)
+                                .overlay(alignment: .bottomTrailing) {
+                                    // Check badge
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.green)
+                                            .frame(width: 48, height: 48)
+                                        
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 28))
+                                            .foregroundColor(.white)
+                                    }
+                                    .offset(x: -12, y: -12)
+                                    .scaleEffect(checkScale)
+                                }
+                                .scaleEffect(bookScale)
                         }
-                        .offset(x: -12, y: -12)
-                        .scaleEffect(checkScale)
                     }
-                    .scaleEffect(bookScale)
-                }
-                
-                // Sparkles and Title
-                HStack(spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 20))
-                        .foregroundColor(Color(red: 0.96, green: 0.82, blue: 0.25))
                     
-                    Text("CONGRATULATIONS")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(Color(red: 0.96, green: 0.82, blue: 0.25))
-                        .tracking(2)
+                    // Sparkles and Title
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.96, green: 0.82, blue: 0.25))
+                        
+                        Text("CONGRATULATIONS")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(Color(red: 0.96, green: 0.82, blue: 0.25))
+                            .tracking(2)
+                        
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.96, green: 0.82, blue: 0.25))
+                    }
                     
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 20))
-                        .foregroundColor(Color(red: 0.96, green: 0.82, blue: 0.25))
+                    // Title
+                    Text("Book Unlocked!")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(.white)
+                    
+                    // Book title
+                    Text(book.title)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .padding(.horizontal, 40)
+                    
+                    // Subtitle
+                    Text("Added to your library")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white.opacity(0.5))
+                        .padding(.top, 16)
                 }
+                .scaleEffect(scale)
+                .opacity(opacity)
                 
-                // Title
-                Text("Book Unlocked!")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(.white)
-                
-                // Book title
-                Text(book.title)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(.white.opacity(0.7))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .padding(.horizontal, 40)
-                
-                // Subtitle
-                Text("Added to your library")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.white.opacity(0.5))
-                    .padding(.top, 16)
+                Spacer()
+                    .frame(maxHeight: 200) // Larger bottom spacer pushes content up
             }
-            .scaleEffect(scale)
-            .opacity(opacity)
         }
         .onAppear {
             // Entrance animation

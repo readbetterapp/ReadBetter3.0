@@ -53,17 +53,73 @@ final class AuthManager: NSObject, ObservableObject {
     override init() {
         super.init()
         
-        authHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
-            guard let self else { return }
-            Task { @MainActor in
-                self.user = user
-                self.isReady = true
-                await self.refreshProfile()
+        // First, validate any cached session before setting up the listener
+        // This ensures deleted users are signed out before the app shows content
+        Task { @MainActor in
+            await self.validateSession()
+            
+            // Now set up the auth state listener
+            self.authHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.user = user
+                    self.isReady = true
+                    if user != nil {
+                        await self.refreshProfile()
+                    } else {
+                        self.profile = nil
+                    }
+                    // Notify other services about auth state change
+                    NotificationCenter.default.post(name: .AuthStateDidChangeNotification, object: nil)
+                }
             }
         }
         
-        // Always ensure we have a UID (critical for per-user bookmarks).
-        Task { await signInAnonymouslyIfNeeded() }
+        // Don't auto-create anonymous users - let guests browse without account
+        // Account only created when they sign in or try to purchase
+    }
+    
+    /// Validates that the current cached user still exists on Firebase backend.
+    /// If the user was deleted server-side, this will sign them out locally.
+    func validateSession() async {
+        guard let currentUser = Auth.auth().currentUser else {
+            // No user cached, nothing to validate
+            return
+        }
+        
+        do {
+            // Force reload user from Firebase backend
+            try await currentUser.reload()
+            // User still exists, update our reference
+            user = Auth.auth().currentUser
+            print("✅ Session validated: user still exists on Firebase")
+        } catch {
+            let nsError = error as NSError
+            
+            // Check if the error indicates the user was deleted
+            // Error codes: userNotFound (17011), userTokenExpired (17021), invalidUserToken (17017)
+            let isUserDeleted = nsError.domain == AuthErrors.domain && (
+                AuthErrorCode(rawValue: nsError.code) == .userNotFound ||
+                AuthErrorCode(rawValue: nsError.code) == .userTokenExpired ||
+                AuthErrorCode(rawValue: nsError.code) == .invalidUserToken ||
+                AuthErrorCode(rawValue: nsError.code) == .userDisabled
+            )
+            
+            if isUserDeleted {
+                print("⚠️ User was deleted from Firebase - signing out locally")
+                // User was deleted server-side, sign out locally
+                do {
+                    try Auth.auth().signOut()
+                    user = nil
+                    profile = nil
+                } catch {
+                    print("❌ Failed to sign out deleted user: \(error.localizedDescription)")
+                }
+            } else {
+                // Some other error (network issue, etc.) - don't sign out
+                print("⚠️ Session validation failed (non-fatal): \(error.localizedDescription)")
+            }
+        }
     }
     
     deinit {
@@ -73,7 +129,8 @@ final class AuthManager: NSObject, ObservableObject {
     }
     
     var uid: String? { user?.uid }
-    var isAnonymous: Bool { user?.isAnonymous ?? false }
+    var isAnonymous: Bool { user?.isAnonymous ?? true } // No user = treat as guest
+    var isSignedIn: Bool { user != nil && !(user?.isAnonymous ?? true) } // True only for real accounts
     
     var displayName: String {
         if let p = profile?.displayName,
@@ -104,16 +161,25 @@ final class AuthManager: NSObject, ObservableObject {
         }
     }
     
-    /// Logs out and immediately returns the app to an anonymous session (keeps UX consistent for bookmarks).
-    func signOutToAnonymous() async {
+    /// Logs out the current user completely (returns to guest state with no account)
+    func signOut() async {
         do {
+            // Sign out from Google Sign-In SDK (clears cached Google account)
+            GIDSignIn.sharedInstance.signOut()
+            
+            // Sign out from Firebase Auth
             try Auth.auth().signOut()
             user = nil
             profile = nil
         } catch {
             lastErrorMessage = "Sign out failed: \(error.localizedDescription)"
         }
-        await signInAnonymouslyIfNeeded()
+        // Don't create new anonymous user - user becomes a true guest
+    }
+    
+    /// Legacy method name for compatibility
+    func signOutToAnonymous() async {
+        await signOut()
     }
     
     // MARK: - Email / Password

@@ -22,6 +22,14 @@ service cloud.firestore {
       }
     }
     
+    // Phantom books (books not yet in catalogue, discovered via Google Books)
+    // Public read access for Learning Path feature
+    match /phantomBooks/{bookId} {
+      allow read: if true;
+      // Writes are managed by backend/admin tooling
+      allow write: if false;
+    }
+    
     // Explainable terms (context-specific definitions for reader)
     match /explainableTerms/{bookId} {
       allow read: if true;
@@ -47,6 +55,25 @@ service cloud.firestore {
       }
       
       match /readingProgress/{bookId} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      match /ownedBooks/{bookId} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      // User preferences (onboarding choices for Learning Path)
+      match /preferences/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      // User's personalized Learning Path
+      match /learningPath/{document=**} {
+        allow read, write: if isOwner(userId);
+      }
+      
+      // Reading sessions (daily stats tracking)
+      match /readingSessions/{sessionId} {
         allow read, write: if isOwner(userId);
       }
     }

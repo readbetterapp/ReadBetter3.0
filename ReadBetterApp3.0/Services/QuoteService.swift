@@ -19,6 +19,8 @@ final class QuoteService: ObservableObject {
     private let quoteKey = "cached_daily_quote"
     private let quoteDateKey = "cached_quote_date"
     private let quoteAuthorKey = "cached_quote_author"
+    private let cacheVersionKey = "quote_cache_version"
+    private let currentCacheVersion = 3  // Increment this to force cache clear
     
     // OpenAI API Configuration
     private let openAIAPIKey: String
@@ -26,7 +28,22 @@ final class QuoteService: ObservableObject {
     
     init(apiKey: String = "") {
         self.openAIAPIKey = apiKey
+        
+        // Check cache version - clear if outdated
+        let savedVersion = userDefaults.integer(forKey: cacheVersionKey)
+        if savedVersion < currentCacheVersion {
+            print("📖 QuoteService: Cache version outdated (\(savedVersion) < \(currentCacheVersion)), clearing cache")
+            clearCacheSync()
+            userDefaults.set(currentCacheVersion, forKey: cacheVersionKey)
+        }
+        
         loadCachedQuote()
+    }
+    
+    private func clearCacheSync() {
+        userDefaults.removeObject(forKey: quoteKey)
+        userDefaults.removeObject(forKey: quoteAuthorKey)
+        userDefaults.removeObject(forKey: quoteDateKey)
     }
     
     // MARK: - Public Methods
@@ -34,8 +51,14 @@ final class QuoteService: ObservableObject {
     func fetchDailyQuote() async {
         // Check if we have a valid cached quote from today
         if let cachedQuote = currentQuote, isCachedQuoteValid() {
-            print("📖 QuoteService: Using cached quote from today")
+            print("📖 QuoteService: Using cached quote from today (cached date: \(cachedQuote.date))")
             return
+        }
+        
+        // Clear old cache if it exists but is invalid
+        if currentQuote != nil {
+            print("📖 QuoteService: Cache expired, clearing old quote")
+            clearCache()
         }
         
         isLoading = true
@@ -54,11 +77,12 @@ final class QuoteService: ObservableObject {
             let quote = try await fetchFromOpenAI()
             currentQuote = quote
             cacheQuote(quote)
-            print("✅ QuoteService: Successfully fetched and cached quote")
+            print("✅ QuoteService: Successfully fetched and cached quote: \"\(quote.text)\" - \(quote.author)")
             isLoading = false
         } catch {
             lastError = error.localizedDescription
-            print("❌ QuoteService: Failed to fetch quote - \(error.localizedDescription)")
+            print("❌ QuoteService: Failed to fetch quote - \(error)")
+            print("❌ QuoteService: Error details - \(String(describing: error))")
             isLoading = false
         }
     }
@@ -85,13 +109,33 @@ final class QuoteService: ObservableObject {
         let now = Date()
         
         // Check if quote is from today
-        return calendar.isDate(quote.date, inSameDayAs: now)
+        let isToday = calendar.isDate(quote.date, inSameDayAs: now)
+        
+        // Also check the seed matches (extra validation)
+        let cachedSeed = calendar.dateComponents([.year, .month, .day], from: quote.date)
+        let todaySeed = calendar.dateComponents([.year, .month, .day], from: now)
+        
+        let seedMatches = cachedSeed.year == todaySeed.year &&
+                          cachedSeed.month == todaySeed.month &&
+                          cachedSeed.day == todaySeed.day
+        
+        print("📖 QuoteService: Cache validation - isToday: \(isToday), seedMatches: \(seedMatches), quoteDate: \(quote.date), now: \(now)")
+        
+        return isToday && seedMatches
     }
     
     private func cacheQuote(_ quote: DailyQuote) {
         userDefaults.set(quote.text, forKey: quoteKey)
         userDefaults.set(quote.author, forKey: quoteAuthorKey)
         userDefaults.set(ISO8601DateFormatter().string(from: quote.date), forKey: quoteDateKey)
+        print("📖 QuoteService: Cached quote for date: \(ISO8601DateFormatter().string(from: quote.date))")
+    }
+    
+    private func clearCache() {
+        userDefaults.removeObject(forKey: quoteKey)
+        userDefaults.removeObject(forKey: quoteAuthorKey)
+        userDefaults.removeObject(forKey: quoteDateKey)
+        currentQuote = nil
     }
     
     private func getDailySeed() -> Int {
@@ -112,42 +156,66 @@ final class QuoteService: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         let dailySeed = getDailySeed()
+        
+        // List of famous authors to rotate through based on the day
+        let authors = [
+            "Ernest Hemingway", "Mark Twain", "Oscar Wilde", "Jane Austen",
+            "Charles Dickens", "Virginia Woolf", "Jorge Luis Borges", "Franz Kafka",
+            "Leo Tolstoy", "Gabriel García Márquez", "Fyodor Dostoevsky", "Marcel Proust",
+            "James Baldwin", "Toni Morrison", "Ralph Waldo Emerson", "Henry David Thoreau",
+            "C.S. Lewis", "J.R.R. Tolkien", "Ray Bradbury", "Isaac Asimov",
+            "Ursula K. Le Guin", "Margaret Atwood", "Neil Gaiman", "Stephen King",
+            "Haruki Murakami", "Umberto Eco", "Albert Camus", "Simone de Beauvoir",
+            "Maya Angelou", "Walt Whitman", "Emily Dickinson"
+        ]
+        let authorIndex = dailySeed % authors.count
+        let featuredAuthor = authors[authorIndex]
+        
         let prompt = """
-        Generate an inspiring quote about reading or books from a famous author or literary figure. 
+        Give me a real, famous quote about reading, books, or literature from \(featuredAuthor).
+        It must be an actual quote they said or wrote, not made up.
         Format your response as JSON with two fields: "quote" and "author".
         Keep the quote under 150 characters.
-        Use this seed for consistency: \(dailySeed)
         Example: {"quote": "A reader lives a thousand lives before he dies.", "author": "George R.R. Martin"}
         """
         
         let requestBody: [String: Any] = [
             "model": "gpt-3.5-turbo",
             "messages": [
-                ["role": "system", "content": "You are a helpful assistant that provides inspiring quotes about reading and books. Always provide the same quote for the same seed value."],
+                ["role": "system", "content": "You are a helpful assistant that provides real, verified quotes about reading and books from famous authors. Only provide actual quotes, never make them up."],
                 ["role": "user", "content": prompt]
             ],
-            "temperature": 0.0,  // Set to 0 for deterministic output
-            "max_tokens": 150,
-            "seed": dailySeed  // Use seed for consistency across users
+            "temperature": 0.3,  // Slight variation while staying accurate
+            "max_tokens": 150
         ]
         
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
         
+        print("📡 QuoteService: Making API request to OpenAI...")
         let (data, response) = try await URLSession.shared.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
+            print("❌ QuoteService: Invalid response type")
             throw QuoteError.invalidResponse
         }
         
+        print("📡 QuoteService: Got response with status code: \(httpResponse.statusCode)")
+        
         guard httpResponse.statusCode == 200 else {
+            if let errorBody = String(data: data, encoding: .utf8) {
+                print("❌ QuoteService: API error body: \(errorBody)")
+            }
             throw QuoteError.apiError(statusCode: httpResponse.statusCode)
         }
         
         let openAIResponse = try JSONDecoder().decode(OpenAIResponse.self, from: data)
         
         guard let content = openAIResponse.choices.first?.message.content else {
+            print("❌ QuoteService: No content in response")
             throw QuoteError.noContent
         }
+        
+        print("📡 QuoteService: Got content from OpenAI: \(content)")
         
         // Parse the JSON response from the content
         let quoteData = try parseQuoteFromContent(content)

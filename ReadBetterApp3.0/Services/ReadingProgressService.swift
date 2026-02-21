@@ -42,7 +42,8 @@ final class ReadingProgressService: ObservableObject {
     
     // MARK: - User Binding
     
-    func setUser(uid: String?) {
+    /// Set the current user - only syncs to cloud for real accounts (not anonymous/guests)
+    func setUser(uid: String?, isAnonymous: Bool = false) {
         if self.uid == uid { return }
         
         // Stop existing listener
@@ -53,7 +54,8 @@ final class ReadingProgressService: ObservableObject {
         
         self.uid = uid
         
-        if let uid = uid {
+        // Only sync to cloud for real users (not anonymous/guests)
+        if let uid = uid, !isAnonymous {
             // Start listening to Firestore
             startFirestoreListener(uid: uid)
             // Start sync timer
@@ -62,6 +64,10 @@ final class ReadingProgressService: ObservableObject {
             Task {
                 await mergeWithCloud()
             }
+            print("✅ ReadingProgressService: Started cloud sync for user \(uid)")
+        } else {
+            // Guest/anonymous - only use local storage
+            print("ℹ️ ReadingProgressService: Using local-only mode (guest/anonymous)")
         }
         
         updateMostRecent()
@@ -265,6 +271,7 @@ final class ReadingProgressService: ObservableObject {
             .first
     }
 }
+
 
 
 

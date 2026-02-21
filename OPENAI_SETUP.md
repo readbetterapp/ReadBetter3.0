@@ -123,3 +123,4 @@ UserDefaults.standard.removeObject(forKey: "cached_quote_author")
 2. Or modify the `getDailySeed()` function temporarily to return a different value
 
 
+

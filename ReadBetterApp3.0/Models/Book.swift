@@ -25,6 +25,9 @@ struct Book: Identifiable {
     let descriptionAudioUrl: String?
     let descriptionJsonUrl: String?
     
+    // AI-enriched metadata (series info, genres, themes, related books)
+    var enrichedData: EnrichedBookData?
+    
     init(
         id: String,
         title: String,
@@ -39,7 +42,8 @@ struct Book: Identifiable {
         createdAt: Date? = nil,
         hasDescription: Bool? = nil,
         descriptionAudioUrl: String? = nil,
-        descriptionJsonUrl: String? = nil
+        descriptionJsonUrl: String? = nil,
+        enrichedData: EnrichedBookData? = nil
     ) {
         self.id = id
         self.title = title
@@ -55,6 +59,36 @@ struct Book: Identifiable {
         self.hasDescription = hasDescription
         self.descriptionAudioUrl = descriptionAudioUrl
         self.descriptionJsonUrl = descriptionJsonUrl
+        self.enrichedData = enrichedData
+    }
+}
+
+// MARK: - Learning Path Helpers
+
+extension Book {
+    /// Returns true if this book is part of a series
+    var isPartOfSeries: Bool {
+        return enrichedData?.series != nil
+    }
+    
+    /// Returns series information if available
+    var seriesInfo: SeriesInfo? {
+        return enrichedData?.series
+    }
+    
+    /// Returns the series position text (e.g., "Book 2 of 4")
+    var seriesPositionText: String? {
+        return enrichedData?.seriesPositionText
+    }
+    
+    /// Returns genre tags
+    var genres: [String] {
+        return enrichedData?.genres ?? []
+    }
+    
+    /// Returns theme tags
+    var themes: [String] {
+        return enrichedData?.themes ?? []
     }
 }
 
@@ -64,13 +98,15 @@ struct Chapter: Identifiable, Codable {
     let audioUrl: String
     let jsonUrl: String
     let order: Int
+    let duration: Double? // Duration in seconds
     
-    init(id: String, title: String, audioUrl: String, jsonUrl: String, order: Int) {
+    init(id: String, title: String, audioUrl: String, jsonUrl: String, order: Int, duration: Double? = nil) {
         self.id = id
         self.title = title
         self.audioUrl = audioUrl
         self.jsonUrl = jsonUrl
         self.order = order
+        self.duration = duration
     }
 }
 

@@ -7,10 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C2270F9F2F1B4EBD00E23E45 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = C2270F9E2F1B4EBD00E23E45 /* Kingfisher */; };
 		C265A2982EF7906900F637B9 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = C265A2972EF7906900F637B9 /* FirebaseAuth */; };
 		C265A29B2EF7909800F637B9 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = C265A29A2EF7909800F637B9 /* GoogleSignIn */; };
 		C265A29D2EF7909800F637B9 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = C265A29C2EF7909800F637B9 /* GoogleSignInSwift */; };
-		C265A6772F03777600F637B9 /* Secrets.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = C265A6762F03777600F637B9 /* Secrets.xcconfig */; };
 		C2F397E42EDBFA4B00241D39 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = C2F397572EDBF93600241D39 /* FirebaseCore */; };
 		C2F397E52EDBFA4B00241D39 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = C2F397582EDBF93700241D39 /* FirebaseFirestore */; };
 /* End PBXBuildFile section */
@@ -33,6 +33,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C2270F9F2F1B4EBD00E23E45 /* Kingfisher in Frameworks */,
 				C265A29D2EF7909800F637B9 /* GoogleSignInSwift in Frameworks */,
 				C2F397E52EDBFA4B00241D39 /* FirebaseFirestore in Frameworks */,
 				C265A29B2EF7909800F637B9 /* GoogleSignIn in Frameworks */,
@@ -86,6 +87,7 @@
 				C265A2972EF7906900F637B9 /* FirebaseAuth */,
 				C265A29A2EF7909800F637B9 /* GoogleSignIn */,
 				C265A29C2EF7909800F637B9 /* GoogleSignInSwift */,
+				C2270F9E2F1B4EBD00E23E45 /* Kingfisher */,
 			);
 			productName = ReadBetterApp3.0;
 			productReference = C2F3972A2EDBD22800241D39 /* Read Better DEBUG.app */;
@@ -99,7 +101,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2600;
-				LastUpgradeCheck = 2600;
+				LastUpgradeCheck = 2620;
 				TargetAttributes = {
 					C2F397292EDBD22800241D39 = {
 						CreatedOnToolsVersion = 26.0.1;
@@ -118,6 +120,7 @@
 			packageReferences = (
 				C2F397562EDBF93500241D39 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 				C265A2992EF7909800F637B9 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+				C2270F9D2F1B4EBD00E23E45 /* XCRemoteSwiftPackageReference "Kingfisher" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C2F3972B2EDBD22800241D39 /* Products */;
@@ -134,7 +137,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C265A6772F03777600F637B9 /* Secrets.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -186,6 +188,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 4XX56TKSL5;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -203,6 +206,7 @@
 				MTL_FAST_MATH = YES;
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=*]" = "com.ermintupkovic.readbetter-beta";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -218,7 +222,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = 4XX56TKSL5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ReadBetterApp3-0-Info.plist";
@@ -283,6 +286,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 4XX56TKSL5;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -307,6 +311,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=*]" = "com.ermintupkovic.readbetter-dev";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 			};
@@ -347,6 +352,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 4XX56TKSL5;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -364,6 +370,7 @@
 				MTL_FAST_MATH = YES;
 				"PRODUCT_BUNDLE_IDENTIFIER[sdk=*]" = "   com.ermintupkovic.readbetter";
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -378,7 +385,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = 4XX56TKSL5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ReadBetterApp3-0-Info.plist";
@@ -418,7 +424,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
 				CURRENT_PROJECT_VERSION = 2;
-				DEVELOPMENT_TEAM = 4XX56TKSL5;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ReadBetterApp3-0-Info.plist";
@@ -474,6 +479,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		C2270F9D2F1B4EBD00E23E45 /* XCRemoteSwiftPackageReference "Kingfisher" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/onevcat/Kingfisher.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 8.6.2;
+			};
+		};
 		C265A2992EF7909800F637B9 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
@@ -493,6 +506,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		C2270F9E2F1B4EBD00E23E45 /* Kingfisher */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C2270F9D2F1B4EBD00E23E45 /* XCRemoteSwiftPackageReference "Kingfisher" */;
+			productName = Kingfisher;
+		};
 		C265A2972EF7906900F637B9 /* FirebaseAuth */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C2F397562EDBF93500241D39 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;

@@ -20,6 +20,8 @@ class BookService: ObservableObject {
     private let logger = Logger(subsystem: "com.readbetter", category: "BookService")
     
     @Published var books: [Book] = []
+    @Published var filteredBooks: [Book] = []
+    @Published var selectedGenre: String? = nil
     @Published var isLoading = false
     @Published var hasLoadedOnce = false // Track if we've loaded at least once
     @Published var isFetching = false // Track if fetch is in progress (prevents duplicate calls)
@@ -122,6 +124,12 @@ class BookService: ObservableObject {
         for document in snapshot.documents {
             let data = document.data()
             
+            // Parse enrichedData if present
+            var enrichedData: EnrichedBookData? = nil
+            if let enrichedDataDict = data["enrichedData"] as? [String: Any] {
+                enrichedData = EnrichedBookData(data: enrichedDataDict)
+            }
+            
             let book = Book(
                 id: data["id"] as? String ?? document.documentID,
                 title: data["title"] as? String ?? "Unknown",
@@ -140,12 +148,14 @@ class BookService: ObservableObject {
                           let order = chapterData["order"] as? Int else {
                         return nil
                     }
-                    return Chapter(id: id, title: title, audioUrl: audioUrl, jsonUrl: jsonUrl, order: order)
+                    let duration = chapterData["duration"] as? Double
+                    return Chapter(id: id, title: title, audioUrl: audioUrl, jsonUrl: jsonUrl, order: order, duration: duration)
                 } ?? [],
                 createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
                 hasDescription: data["hasDescription"] as? Bool,
                 descriptionAudioUrl: data["descriptionAudioUrl"] as? String,
-                descriptionJsonUrl: data["descriptionJsonUrl"] as? String
+                descriptionJsonUrl: data["descriptionJsonUrl"] as? String,
+                enrichedData: enrichedData
             )
             
             fetchedBooks.append(book)
@@ -167,6 +177,12 @@ class BookService: ObservableObject {
             return nil
         }
         
+        // Parse enrichedData if present
+        var enrichedData: EnrichedBookData? = nil
+        if let enrichedDataDict = data["enrichedData"] as? [String: Any] {
+            enrichedData = EnrichedBookData(data: enrichedDataDict)
+        }
+        
         let book = Book(
             id: data["id"] as? String ?? document.documentID,
             title: data["title"] as? String ?? "Unknown",
@@ -185,17 +201,80 @@ class BookService: ObservableObject {
                       let order = chapterData["order"] as? Int else {
                     return nil
                 }
-                return Chapter(id: id, title: title, audioUrl: audioUrl, jsonUrl: jsonUrl, order: order)
+                let duration = chapterData["duration"] as? Double
+                return Chapter(id: id, title: title, audioUrl: audioUrl, jsonUrl: jsonUrl, order: order, duration: duration)
             } ?? [],
             createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
             hasDescription: data["hasDescription"] as? Bool,
             descriptionAudioUrl: data["descriptionAudioUrl"] as? String,
-            descriptionJsonUrl: data["descriptionJsonUrl"] as? String
+            descriptionJsonUrl: data["descriptionJsonUrl"] as? String,
+            enrichedData: enrichedData
         )
         
         logger.info("✅ Loaded book from Firebase: \(book.title)")
         
         return book
+    }
+    
+    /// Filter books by genre search terms
+    /// Searches across book titles, authors, and descriptions
+    func filterBooksByGenre(_ searchTerms: [String]) {
+        Task { @MainActor [self] in
+            guard !books.isEmpty else {
+                filteredBooks = []
+                return
+            }
+            
+            let lowercasedTerms = searchTerms.map { $0.lowercased() }
+            
+            filteredBooks = books.filter { book in
+                // Search in title
+                let titleMatch = lowercasedTerms.contains { term in
+                    book.title.lowercased().contains(term)
+                }
+                
+                // Search in author
+                let authorMatch = lowercasedTerms.contains { term in
+                    book.author.lowercased().contains(term)
+                }
+                
+                // Search in description
+                let descriptionMatch: Bool
+                if let description = book.description?.lowercased() {
+                    descriptionMatch = lowercasedTerms.contains { term in
+                        description.contains(term)
+                    }
+                } else {
+                    descriptionMatch = false
+                }
+                
+                // Search in enriched genres
+                let genreMatch: Bool
+                if let genres = book.enrichedData?.genres {
+                    let lowercasedGenres = genres.map { $0.lowercased() }
+                    genreMatch = lowercasedTerms.contains { term in
+                        lowercasedGenres.contains { genre in
+                            genre.contains(term) || term.contains(genre)
+                        }
+                    }
+                } else {
+                    genreMatch = false
+                }
+                
+                return titleMatch || authorMatch || descriptionMatch || genreMatch
+            }
+            
+            logger.info("🔍 Filtered \(filteredBooks.count) books for genre terms: \(searchTerms.joined(separator: ", "))")
+        }
+    }
+    
+    /// Clear genre filter and reset filtered books
+    func clearGenreFilter() {
+        Task { @MainActor [self] in
+            selectedGenre = nil
+            filteredBooks = []
+            logger.info("🔍 Cleared genre filter")
+        }
     }
     
 }

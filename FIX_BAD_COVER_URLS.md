@@ -137,3 +137,4 @@ After the fixes I just made:
 The lag you see is just the network request timing out. Fixing the URL in Firestore will eliminate it completely.
 
 
+

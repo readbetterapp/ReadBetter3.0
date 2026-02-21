@@ -6,6 +6,8 @@
 //  - Measure rendered text height for a given width/font/lineSpacing
 //  - Compute bounding rects for specific character ranges (words)
 //
+//  Uses TextKit 2 for modern, consistent text layout matching UITextView.
+//
 
 import Foundation
 import UIKit
@@ -32,11 +34,20 @@ enum SentenceTextLayout {
         let key = MeasurementKey(text: text, width: w, font: font, lineSpacing: lineSpacing)
         if let cached = measurementCache[key] { return cached }
         
-        let (layoutManager, textContainer) = makeLayout(text: text, width: w, font: font, lineSpacing: lineSpacing)
-        layoutManager.ensureLayout(for: textContainer)
-        let used = layoutManager.usedRect(for: textContainer)
+        let (textLayoutManager, textContainer, _) = makeTextKit2Layout(text: text, width: w, font: font, lineSpacing: lineSpacing)
+        textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
         
-        let result = Measurement(height: ceil(used.height), usedRect: used)
+        // Calculate used rect from all layout fragments
+        var usedRect = CGRect.zero
+        textLayoutManager.enumerateTextLayoutFragments(
+            from: textLayoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            usedRect = usedRect.union(fragment.layoutFragmentFrame)
+            return true
+        }
+        
+        let result = Measurement(height: ceil(usedRect.height), usedRect: usedRect)
         measurementCache[key] = result
         return result
     }
@@ -53,9 +64,18 @@ enum SentenceTextLayout {
         let key = LayoutKey(sentenceId: sentenceId, text: text, width: w, font: font, lineSpacing: lineSpacing)
         if let cached = layoutCache[key] { return cached }
         
-        let (layoutManager, textContainer) = makeLayout(text: text, width: w, font: font, lineSpacing: lineSpacing)
-        layoutManager.ensureLayout(for: textContainer)
-        let used = layoutManager.usedRect(for: textContainer)
+        let (textLayoutManager, textContainer, textContentStorage) = makeTextKit2Layout(text: text, width: w, font: font, lineSpacing: lineSpacing)
+        textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+        
+        // Calculate used rect
+        var usedRect = CGRect.zero
+        textLayoutManager.enumerateTextLayoutFragments(
+            from: textLayoutManager.documentRange.location,
+            options: [.ensuresLayout]
+        ) { fragment in
+            usedRect = usedRect.union(fragment.layoutFragmentFrame)
+            return true
+        }
         
         var rects: [Int: CGRect] = [:]
         rects.reserveCapacity(wordRanges.count)
@@ -64,21 +84,41 @@ enum SentenceTextLayout {
             let nsRange = NSRange(swiftRange, in: text)
             guard nsRange.location != NSNotFound, nsRange.length > 0 else { continue }
             
-            let glyphRange = layoutManager.glyphRange(forCharacterRange: nsRange, actualCharacterRange: nil)
-            guard glyphRange.length > 0 else { continue }
+            // Convert NSRange to NSTextRange for TextKit 2
+            guard let startLocation = textContentStorage.location(textContentStorage.documentRange.location, offsetBy: nsRange.location),
+                  let endLocation = textContentStorage.location(startLocation, offsetBy: nsRange.length),
+                  let textRange = NSTextRange(location: startLocation, end: endLocation) else {
+                continue
+            }
             
-            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-            rects[wordIndex] = rect
+            // Get bounding rect for this text range
+            var wordRect = CGRect.zero
+            textLayoutManager.enumerateTextSegments(
+                in: textRange,
+                type: .standard,
+                options: []
+            ) { segmentRange, segmentFrame, baselinePosition, textContainer in
+                if wordRect.isEmpty {
+                    wordRect = segmentFrame
+                } else {
+                    wordRect = wordRect.union(segmentFrame)
+                }
+                return true
+            }
+            
+            if !wordRect.isEmpty {
+                rects[wordIndex] = wordRect
+            }
         }
         
-        let result = Layout(usedRect: used, rectsByWordIndex: rects)
+        let result = Layout(usedRect: usedRect, rectsByWordIndex: rects)
         layoutCache[key] = result
         return result
     }
     
     // MARK: - Internals
     
-    private static func makeLayout(text: String, width: CGFloat, font: UIFont, lineSpacing: CGFloat) -> (NSLayoutManager, NSTextContainer) {
+    private static func makeTextKit2Layout(text: String, width: CGFloat, font: UIFont, lineSpacing: CGFloat) -> (NSTextLayoutManager, NSTextContainer, NSTextContentStorage) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = lineSpacing
         paragraph.lineBreakMode = .byWordWrapping
@@ -91,15 +131,18 @@ enum SentenceTextLayout {
             ]
         )
         
-        let textStorage = NSTextStorage(attributedString: attributed)
-        let layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
+        // Create TextKit 2 infrastructure
+        let textContentStorage = NSTextContentStorage()
+        textContentStorage.attributedString = attributed
+        
+        let textLayoutManager = NSTextLayoutManager()
+        textContentStorage.addTextLayoutManager(textLayoutManager)
         
         let textContainer = NSTextContainer(size: CGSize(width: width, height: .greatestFiniteMagnitude))
         textContainer.lineFragmentPadding = 0
-        layoutManager.addTextContainer(textContainer)
+        textLayoutManager.textContainer = textContainer
         
-        return (layoutManager, textContainer)
+        return (textLayoutManager, textContainer, textContentStorage)
     }
     
     private struct MeasurementKey: Hashable {
@@ -140,12 +183,3 @@ enum SentenceTextLayout {
         }
     }
 }
-
-
-
-
-
-
-
-
-

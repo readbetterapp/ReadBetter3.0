@@ -9,6 +9,7 @@ import SwiftUI
 import FirebaseCore
 import AVFoundation
 import GoogleSignIn
+import Kingfisher
 
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
@@ -20,6 +21,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         
         // Configure Firebase with the correct plist based on bundle ID
         configureFirebase()
+        
+        // Configure Kingfisher image cache for optimal performance
+        configureKingfisher()
         
         return true
     }
@@ -52,6 +56,25 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                      open url: URL,
                      options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
         return GIDSignIn.sharedInstance.handle(url)
+    }
+    
+    private func configureKingfisher() {
+        // Configure memory cache - 150MB for smooth scrolling with many images
+        ImageCache.default.memoryStorage.config.totalCostLimit = 150 * 1024 * 1024 // 150 MB
+        
+        // Configure disk cache - 500MB for persistent storage
+        ImageCache.default.diskStorage.config.sizeLimit = 500 * 1024 * 1024 // 500 MB
+        
+        // Memory cache expiration - keep images in memory for 10 minutes
+        ImageCache.default.memoryStorage.config.expiration = .seconds(600)
+        
+        // Disk cache expiration - keep images on disk for 7 days
+        ImageCache.default.diskStorage.config.expiration = .days(7)
+        
+        // Enable automatic memory cleanup on memory warning
+        ImageCache.default.memoryStorage.config.cleanInterval = 120 // Clean every 2 minutes
+        
+        print("✅ Kingfisher configured: Memory=150MB, Disk=500MB, Expiration=7days")
     }
     
     private func configureAudioSessionForBackgroundPlayback() {

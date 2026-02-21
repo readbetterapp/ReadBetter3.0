@@ -6,11 +6,13 @@
 //
 
 import SwiftUI
+import Kingfisher
 
 struct BookDetailsView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var readingProgressService: ReadingProgressService
+    @EnvironmentObject var authManager: AuthManager
     @StateObject private var bookService = BookService.shared
     @StateObject private var ownershipService = BookOwnershipService.shared
     
@@ -19,6 +21,7 @@ struct BookDetailsView: View {
     @State private var isDescriptionExpanded = false
     @State private var isLoading = true
     @State private var showUnlockModal = false
+    @State private var showLoginPrompt = false
     
     var body: some View {
         ZStack {
@@ -29,15 +32,23 @@ struct BookDetailsView: View {
                 ProgressView()
                     .tint(themeManager.colors.primary)
             } else if let book = book {
-                ZStack(alignment: .top) {
-                    // Blurred background image - fixed behind
-                    backgroundImageView(book: book)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                    
-                    // Scrollable content
+                // Blurred background image - fixed behind
+                backgroundImageView(book: book)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                
+                // Scrollable content
+                ScrollViewReader { proxy in
                     ScrollView {
                         VStack(spacing: 24) {
+                            // Invisible anchor for scroll position
+                            Color.clear
+                                .frame(height: 1)
+                                .id("top")
+                            
+                            // Top spacing to position content below back button
+                            Spacer().frame(height: 175)
+                            
                             // Book Cover and Info
                             bookCoverSection(book: book)
                             
@@ -61,10 +72,13 @@ struct BookDetailsView: View {
                             bookInfoSection(book: book)
                         }
                         .padding(.horizontal, 16)
-                        .padding(.top, 80) // Space for header
-                        .padding(.bottom, 100)
+                        .padding(.bottom, 200)
                     }
                     .scrollIndicators(.hidden)
+                    .contentMargins(.bottom, 0, for: .scrollContent)
+                    .onAppear {
+                        proxy.scrollTo("top", anchor: .top)
+                    }
                 }
             } else {
                 VStack(spacing: 16) {
@@ -105,23 +119,30 @@ struct BookDetailsView: View {
                     .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showUnlockModal)
             }
         }
+        .overlay {
+            if showLoginPrompt {
+                LoginPromptOverlay(isPresented: $showLoginPrompt)
+                    .environmentObject(themeManager)
+                    .environmentObject(router)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showLoginPrompt)
+            }
+        }
     }
     
     // MARK: - Background Image
     private func backgroundImageView(book: Book) -> some View {
         ZStack(alignment: .bottom) {
             if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
-                AsyncImage(url: url) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    Color.clear
-                }
-                .frame(height: 600)
-                .clipped()
-                .blur(radius: 40)
-                .opacity(0.2)
+                KFImage(url)
+                    .placeholder { Color.clear }
+                    .fade(duration: 0.2)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: UIScreen.main.bounds.width, height: 1200)
+                    .clipped()
+                    .blur(radius: 40)
+                    .opacity(0.2)
             }
             
             // Gradient fade
@@ -130,9 +151,9 @@ struct BookDetailsView: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .frame(height: 250)
+            .frame(height: 400)
         }
-        .frame(height: 600)
+        .frame(height: 1200)
         .allowsHitTesting(false)
     }
     
@@ -173,35 +194,35 @@ struct BookDetailsView: View {
         return VStack(spacing: 24) {
             // Book Cover (no progress overlay)
             if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
-                AsyncImage(url: url) { image in
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    RoundedRectangle(cornerRadius: 0)
-                        .fill(themeManager.colors.card)
-                        .overlay {
-                            Image(systemName: "book.fill")
-                                .font(.system(size: 40))
-                                .foregroundColor(themeManager.colors.textSecondary)
-                        }
-                }
-                .frame(width: 200, height: 280)
-                .clipShape(RoundedRectangle(cornerRadius: 0))
-                .shadow(color: .black.opacity(0.3), radius: 8, x: 4, y: 6)
-                .overlay(alignment: .leading) {
-                    // Spine effect
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.4),
-                            Color.white.opacity(0.1),
-                            Color.black.opacity(0.05)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                    .frame(width: 8)
-                }
+                KFImage(url)
+                    .placeholder {
+                        RoundedRectangle(cornerRadius: 0)
+                            .fill(themeManager.colors.card)
+                            .overlay {
+                                Image(systemName: "book.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(themeManager.colors.textSecondary)
+                            }
+                    }
+                    .fade(duration: 0.2)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 200, height: 280)
+                    .clipShape(RoundedRectangle(cornerRadius: 0))
+                    .shadow(color: .black.opacity(0.3), radius: 8, x: 4, y: 6)
+                    .overlay(alignment: .leading) {
+                        // Spine effect
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.4),
+                                Color.white.opacity(0.1),
+                                Color.black.opacity(0.05)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: 8)
+                    }
             }
             
             // Title and Author
@@ -232,8 +253,14 @@ struct BookDetailsView: View {
                             router.navigate(to: .reader(bookId: book.id, chapterNumber: nil))
                         }
                     } else {
-                        // Show unlock modal
-                        showUnlockModal = true
+                        // Check if user is signed in (not guest)
+                        if authManager.isSignedIn {
+                            // Show unlock modal
+                            showUnlockModal = true
+                        } else {
+                            // Show login prompt for guests
+                            showLoginPrompt = true
+                        }
                     }
                 }) {
                     HStack(spacing: 8) {
@@ -272,26 +299,6 @@ struct BookDetailsView: View {
                         )
                         .clipShape(Capsule())
                     }
-                }
-                
-                if !hasPlayableContent {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(themeManager.colors.accent)
-                        Text("Book unavailable")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(themeManager.colors.text)
-                        Spacer()
-                    }
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 14)
-                    .background(themeManager.colors.card)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(themeManager.colors.cardBorder, lineWidth: 1)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
                 
                 // Read Summary button (only show if book has description)
@@ -349,12 +356,21 @@ struct BookDetailsView: View {
             }
         }
         .padding(16)
-        .background(themeManager.colors.card)
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
-        )
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.clear)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
     }
     
     // MARK: - Reading Progress Section
@@ -399,12 +415,21 @@ struct BookDetailsView: View {
             }
         }
         .padding(16)
-        .background(themeManager.colors.card)
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
-        )
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.clear)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
     }
     
     // MARK: - Chapters Section
@@ -432,8 +457,14 @@ struct BookDetailsView: View {
                         // Navigate to reader with specific chapter
                         router.navigate(to: .reader(bookId: book.id, chapterNumber: chapter.order + 1))
                     } else {
-                        // Show unlock modal
-                        showUnlockModal = true
+                        // Check if user is signed in (not guest)
+                        if authManager.isSignedIn {
+                            // Show unlock modal
+                            showUnlockModal = true
+                        } else {
+                            // Show login prompt for guests
+                            showLoginPrompt = true
+                        }
                     }
                 }) {
                     HStack(spacing: 12) {
@@ -493,12 +524,21 @@ struct BookDetailsView: View {
             }
         }
         .padding(16)
-        .background(themeManager.colors.card)
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
-        )
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.clear)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
     }
     
     // MARK: - Book Info Section
@@ -523,12 +563,21 @@ struct BookDetailsView: View {
             }
         }
         .padding(16)
-        .background(themeManager.colors.card)
-        .cornerRadius(16)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
-        )
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.clear)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
     }
     
     private func infoRow(label: String, value: String) -> some View {

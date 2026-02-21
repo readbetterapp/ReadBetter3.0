@@ -35,7 +35,7 @@ struct ThemeColors {
             self.accent = Color(hex: "#FFD700")
         } else {
             // Light mode colors
-            self.background = Color(hex: "#F7FAFF")
+            self.background = Color(hex: "#fafafa")
             self.text = Color(hex: "#1E1F22")
             self.textSecondary = Color(hex: "#9EA2B0")
             self.divider = Color(hex: "#E5E7EB")

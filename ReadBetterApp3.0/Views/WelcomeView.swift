@@ -15,13 +15,16 @@ struct WelcomeView: View {
     @State private var containerPadding: CGFloat = 12
     @State private var fadeOpacity: Double = 1.0
     
+    // Callback when user skips welcome (handled by RootView)
+    var onSkip: (() -> Void)? = nil
+    
     private let words = ["book", "idea", "quote", "message", "story"]
     private let wordMetrics: [(width: CGFloat, padding: CGFloat)] = [
-        (80, 12),   // book
-        (68, 14),   // idea
-        (88, 11),   // quote
-        (130, 10),  // message
-        (78, 13)    // story
+        (80, 10),   // book - use message padding (10) for consistent height
+        (68, 10),   // idea - use message padding (10) for consistent height
+        (88, 10),   // quote - use message padding (10) for consistent height
+        (130, 10),  // message - reference height
+        (78, 10)    // story - use message padding (10) for consistent height
     ]
     
     var body: some View {
@@ -36,7 +39,12 @@ struct WelcomeView: View {
                     HStack {
                         Spacer()
                         Button("Skip") {
-                            router.navigate(to: .tabs)
+                            // Use callback if provided, otherwise fallback to navigation
+                            if let onSkip = onSkip {
+                                onSkip()
+                            } else {
+                                router.navigate(to: .tabs)
+                            }
                         }
                         .foregroundColor(themeManager.colors.textSecondary)
                         .font(.system(size: 16))
@@ -44,62 +52,50 @@ struct WelcomeView: View {
                         .padding(.top, geometry.safeAreaInsets.top + 20)
                     }
                     
+                    // Spacer for logo area (logo is rendered by RootView persistent layer)
                     Spacer()
-                        .frame(height: geometry.size.height * 0.12)
+                        .frame(height: max(0, geometry.size.height * 0.12 - 150))
                     
-                    // Main Content
+                    // Logo placeholder - actual logo rendered by RootView
+                    // This spacer reserves the same height as the logo
+                    Spacer()
+                        .frame(height: 52) // Approximate logo height (36pt font + padding)
+                    
+                    Spacer()
+                    
+                    // Tagline with animated word - centered in middle of page
                     VStack(spacing: 0) {
-                        // Logo
                         HStack(spacing: 4) {
-                            Text("Read")
-                                .font(.system(size: 36, weight: .bold))
-                                .foregroundColor(.black)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(ThemeColors.brand)
-                            
-                            Text("Better")
-                                .font(.system(size: 36, weight: .bold))
-                                .foregroundColor(themeManager.colors.text)
-                                .padding(.leading, 8)
-                        }
-                        .padding(.bottom, 60)
-                        
-                        // Tagline with animated word
-                        VStack(spacing: 0) {
-                            HStack(spacing: 8) {
-                                Text("the")
-                                    .font(.system(size: 28, weight: .semibold))
-                                    .foregroundColor(.black)
-                                
-                                // Animated word container
-                                ZStack {
-                                    ForEach(Array(words.enumerated()), id: \.offset) { index, word in
-                                        Text(word)
-                                            .font(.system(size: 28, weight: .semibold))
-                                            .foregroundColor(.black)
-                                            .opacity(index == currentWordIndex ? 1 : 0)
-                                            .offset(y: index == currentWordIndex ? 0 : 40)
-                                            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: currentWordIndex)
-                                    }
-                                }
-                                .frame(width: containerWidth)
-                                .clipped()
-                                
-                                Text("you miss,")
-                                    .font(.system(size: 28, weight: .semibold))
-                                    .foregroundColor(.black)
-                            }
-                            .padding(.horizontal, containerPadding)
-                            .padding(.vertical, 4)
-                            .background(ThemeColors.brand)
-                            .padding(.bottom, 4)
-                            
-                            Text("won't help.")
+                            Text("the")
                                 .font(.system(size: 28, weight: .semibold))
-                                .foregroundColor(themeManager.colors.text)
+                                .foregroundColor(.black)
+                            
+                            // Animated word container - fixed height to match "message" size
+                            ZStack {
+                                ForEach(Array(words.enumerated()), id: \.offset) { index, word in
+                                    Text(word)
+                                        .font(.system(size: 28, weight: .semibold))
+                                        .foregroundColor(.black)
+                                        .opacity(index == currentWordIndex ? 1 : 0)
+                                        .offset(y: index == currentWordIndex ? 0 : 40)
+                                        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: currentWordIndex)
+                                }
+                            }
+                            .frame(width: containerWidth, height: 34)
+                            .clipped()
+                            
+                            Text("you miss,")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundColor(.black)
                         }
-                        .padding(.bottom, 40)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(ThemeColors.brand)
+                        .padding(.bottom, 4)
+                        
+                        Text("won't help.")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundColor(themeManager.colors.text)
                     }
                     .padding(.horizontal, 40)
                     
@@ -107,21 +103,41 @@ struct WelcomeView: View {
                     
                     // Bottom Section
                     VStack(spacing: 0) {
-                        // Get Started Button
-                        Button(action: {
-                            router.navigate(to: .login)
-                        }) {
-                            Text("Get Started")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.black)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 20)
-                                .background(ThemeColors.brand)
-                                .cornerRadius(50)
-                                .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        // Get Started Button with iOS 26+ Liquid Glass effect
+                        if #available(iOS 26.0, *) {
+                            let glassTintColor = themeManager.isDarkMode 
+                                ? Color(white: 0.3).opacity(0.4) // Uniform mid-grey for dark mode
+                                : Color(white: 0.5).opacity(0.3) // Subtle grey for light mode
+                            
+                            Button(action: {
+                                router.navigate(to: .login)
+                            }) {
+                                Text("Get Started")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(themeManager.isDarkMode ? .white : .black)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 20)
+                            }
+                            .glassEffect(.regular.tint(glassTintColor), in: RoundedRectangle(cornerRadius: 50))
+                            .padding(.horizontal, 40)
+                            .padding(.bottom, 32)
+                        } else {
+                            // Fallback for iOS 25 and earlier
+                            Button(action: {
+                                router.navigate(to: .login)
+                            }) {
+                                Text("Get Started")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(.black)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 20)
+                                    .background(ThemeColors.brand)
+                                    .cornerRadius(50)
+                                    .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                            }
+                            .padding(.horizontal, 40)
+                            .padding(.bottom, 32)
                         }
-                        .padding(.horizontal, 40)
-                        .padding(.bottom, 32)
                         
                         // Theme Toggle Button
                         ThemeToggleButton()

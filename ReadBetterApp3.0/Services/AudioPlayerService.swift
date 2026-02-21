@@ -18,6 +18,7 @@ class AudioPlayerService: ObservableObject {
     
     private var player: AVPlayer?
     private var timeObserver: Any?
+    private weak var timeObserverPlayer: AVPlayer? // Track which player the observer was added to
     private var durationObserver: NSKeyValueObservation?
     
     /// Load and prepare audio from URL
@@ -56,20 +57,23 @@ class AudioPlayerService: ObservableObject {
         }
         
         await MainActor.run {
-            // Remove old time observer
-            if let observer = timeObserver {
-                player?.removeTimeObserver(observer)
+            // Remove old time observer from the player that created it
+            if let observer = timeObserver, let observerPlayer = timeObserverPlayer {
+                observerPlayer.removeTimeObserver(observer)
+                timeObserver = nil
+                timeObserverPlayer = nil
             }
             
             player = newPlayer
             
-                // Add time observer for updates
-                let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-                timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-                    guard let self = self else { return }
-                    // Already on main queue, update directly
-                    self.currentTime = time.seconds
-                }
+            // Add time observer for updates
+            let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            timeObserverPlayer = newPlayer // Track which player we're adding this to
+            timeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+                guard let self = self else { return }
+                // Already on main queue, update directly
+                self.currentTime = time.seconds
+            }
             
             isLoading = false
         }
@@ -105,8 +109,9 @@ class AudioPlayerService: ObservableObject {
     
     /// Cleanup
     deinit {
-        if let observer = timeObserver {
-            player?.removeTimeObserver(observer)
+        // Remove time observer from the player that created it
+        if let observer = timeObserver, let observerPlayer = timeObserverPlayer {
+            observerPlayer.removeTimeObserver(observer)
         }
         durationObserver?.invalidate()
         NotificationCenter.default.removeObserver(self)

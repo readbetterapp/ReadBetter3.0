@@ -8,6 +8,7 @@
 
 import SwiftUI
 import AVFoundation
+import Kingfisher
 
 struct ReaderLoadingView: View {
     @EnvironmentObject var themeManager: ThemeManager
@@ -49,111 +50,101 @@ struct ReaderLoadingView: View {
                     
                     // Blurred cover background
                     if let coverUrl = bookCoverUrl, let url = URL(string: coverUrl) {
-                        AsyncImage(url: url) { image in
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .ignoresSafeArea()
-                                .blur(radius: 50)
-                                .opacity(0.30)
-                        } placeholder: {
-                            EmptyView()
-                        }
+                        KFImage(url)
+                            .placeholder { EmptyView() }
+                            .fade(duration: 0.2)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .ignoresSafeArea()
+                            .blur(radius: 50)
+                            .opacity(0.30)
                     }
                 }
                 
-                VStack(spacing: 32) {
-                    // Book cover image
-                    if let coverUrl = bookCoverUrl, let url = URL(string: coverUrl) {
-                        AsyncImage(url: url) { image in
-                            image
+                VStack(spacing: 0) {
+                    Spacer()
+                    
+                    VStack(spacing: 40) {
+                        // Book cover image - large, similar to BookDetailsView
+                        if let coverUrl = bookCoverUrl, let url = URL(string: coverUrl) {
+                            KFImage(url)
+                                .placeholder {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .fill(themeManager.colors.card)
+                                        .overlay {
+                                            Image(systemName: "book.fill")
+                                                .font(.system(size: 60))
+                                                .foregroundColor(themeManager.colors.textSecondary)
+                                        }
+                                }
+                                .fade(duration: 0.2)
                                 .resizable()
                                 .aspectRatio(contentMode: .fill)
-                        } placeholder: {
-                            RoundedRectangle(cornerRadius: 8)
+                                .frame(width: 200, height: 300)
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                                .shadow(color: .black.opacity(0.4), radius: 16, x: 4, y: 8)
+                        } else {
+                            // Fallback placeholder
+                            RoundedRectangle(cornerRadius: 12)
                                 .fill(themeManager.colors.card)
+                                .frame(width: 200, height: 300)
                                 .overlay {
                                     Image(systemName: "book.fill")
-                                        .font(.system(size: 40))
+                                        .font(.system(size: 60))
                                         .foregroundColor(themeManager.colors.textSecondary)
                                 }
+                                .shadow(color: .black.opacity(0.4), radius: 16, x: 4, y: 8)
                         }
-                        .frame(width: 120, height: 180)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .shadow(color: .black.opacity(0.3), radius: 8, x: 2, y: 4)
-                    } else {
-                        // Fallback placeholder
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(themeManager.colors.card)
-                            .frame(width: 120, height: 180)
-                            .overlay {
-                                Image(systemName: "book.fill")
-                                    .font(.system(size: 40))
-                                    .foregroundColor(themeManager.colors.textSecondary)
+                        
+                        VStack(spacing: 16) {
+                            // Loading text
+                            Text(loadingState.progressText)
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(themeManager.colors.text)
+                            
+                            // Progress bar
+                            GeometryReader { geometry in
+                                ZStack(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(themeManager.colors.card)
+                                        .frame(height: 8)
+                                    
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(themeManager.colors.primary)
+                                        .frame(width: geometry.size.width * loadingState.progress, height: 8)
+                                        .animation(.easeInOut(duration: 0.3), value: loadingState.progress)
+                                }
                             }
-                            .shadow(color: .black.opacity(0.3), radius: 8, x: 2, y: 4)
+                            .frame(height: 8)
+                            .frame(maxWidth: 200)
+                            
+                            // Error state
+                            if case .error(let error) = loadingState {
+                                VStack(spacing: 12) {
+                                    Text(error.localizedDescription)
+                                        .font(.system(size: 14))
+                                        .foregroundColor(.red)
+                                        .multilineTextAlignment(.center)
+                                    
+                                    Button("Try Again") {
+                                        Task {
+                                            await preloadData()
+                                        }
+                                    }
+                                    .foregroundColor(themeManager.colors.primary)
+                                }
+                                .padding(.top, 8)
+                            }
+                        }
+                        .padding(.horizontal, 40)
                     }
                     
-                    VStack(spacing: 16) {
-                        // Loading text
-                        Text(loadingState.progressText)
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(themeManager.colors.text)
-                        
-                        // Progress bar
-                        GeometryReader { geometry in
-                            ZStack(alignment: .leading) {
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(themeManager.colors.card)
-                                    .frame(height: 8)
-                                
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(themeManager.colors.primary)
-                                    .frame(width: geometry.size.width * loadingState.progress, height: 8)
-                                    .animation(.easeInOut(duration: 0.3), value: loadingState.progress)
-                            }
-                        }
-                        .frame(height: 8)
-                        .frame(maxWidth: 200)
-                        
-                        // Error state
-                        if case .error(let error) = loadingState {
-                            VStack(spacing: 12) {
-                                Text(error.localizedDescription)
-                                    .font(.system(size: 14))
-                                    .foregroundColor(.red)
-                                    .multilineTextAlignment(.center)
-                                
-                                Button("Try Again") {
-                                    Task {
-                                        await preloadData()
-                                    }
-                                }
-                                .foregroundColor(themeManager.colors.primary)
-                            }
-                            .padding(.top, 8)
-                        }
-                    }
-                    .padding(.horizontal, 40)
+                    Spacer()
                 }
             }
         }
         .navigationBarBackButtonHidden(true)
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: {
-                    router.navigateBack()
-                }) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(themeManager.colors.text)
-                        .frame(width: 36, height: 36)
-                        .background(themeManager.colors.card)
-                        .clipShape(Circle())
-                }
-            }
-        }
         .onAppear {
             let targetChapter = chapterNumber ?? 1
             
@@ -239,12 +230,21 @@ struct ReaderLoadingView: View {
                 await preloadData()
             }
         }
-        .fullScreenCover(isPresented: $showReader) {
-            if let data = preloadedData {
-                OptimizedReaderView(preloadedData: data, initialSeekTime: resolvedSeekTime)
-                    .environmentObject(themeManager)
-                    .environmentObject(router)
-                    .transition(.move(edge: .trailing))
+        .onChange(of: showReader) { _, newValue in
+            if newValue, let data = preloadedData {
+                // Store preloaded data in audio player for the overlay to use
+                audioPlayer.setPreloadedData(data)
+                
+                // Store the initial seek time in router for the overlay to use
+                router.readerOverlayInitialSeekTime = resolvedSeekTime
+                
+                // Navigate back to tabs and expand the reader overlay
+                router.navigateBackToTabs()
+                
+                // Small delay to let navigation complete, then expand
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    router.expandReaderFromMiniPlayer()
+                }
             }
         }
     }
@@ -465,4 +465,5 @@ enum ReaderLoadingError: LocalizedError {
         }
     }
 }
+
 

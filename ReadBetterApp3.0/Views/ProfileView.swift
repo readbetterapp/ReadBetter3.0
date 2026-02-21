@@ -321,7 +321,7 @@ struct ProfileView: View {
     }
     
     private func handleLogout() async {
-        await authManager.signOutToAnonymous()
+        await authManager.signOut()
         router.navigateToRoot()
     }
     

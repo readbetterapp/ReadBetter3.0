@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Kingfisher
 
 struct UnlockBookModal: View {
     @EnvironmentObject var themeManager: ThemeManager
@@ -44,22 +45,22 @@ struct UnlockBookModal: View {
                 
                 // Book Cover Preview
                 if let coverUrl = book.coverUrl, let url = URL(string: coverUrl) {
-                    AsyncImage(url: url) { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(themeManager.colors.card)
-                            .overlay {
-                                Image(systemName: "book.fill")
-                                    .font(.system(size: 30))
-                                    .foregroundColor(themeManager.colors.textSecondary)
-                            }
-                    }
-                    .frame(width: 80, height: 110)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .shadow(color: .black.opacity(0.3), radius: 6, x: 2, y: 4)
+                    KFImage(url)
+                        .placeholder {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(themeManager.colors.card)
+                                .overlay {
+                                    Image(systemName: "book.fill")
+                                        .font(.system(size: 30))
+                                        .foregroundColor(themeManager.colors.textSecondary)
+                                }
+                        }
+                        .fade(duration: 0.2)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 80, height: 110)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .shadow(color: .black.opacity(0.3), radius: 6, x: 2, y: 4)
                 }
                 
                 // Lock Icon & Title

@@ -13,6 +13,7 @@ const logger = require("firebase-functions/logger");
 const { libraryCache, chapterIndexCache } = require('./utils/cache');
 const { parseTranscript } = require('./utils/transcriptParser');
 const { processChapterExplainableTerms } = require('./utils/explainableTermsExtractor');
+const { parseStream } = require('music-metadata');
 
 // Define OpenAI API key as a secret
 const openaiApiKey = defineSecret("OPENAI_API_KEY");
@@ -132,6 +133,39 @@ async function isBookFolder(isbn) {
  * Discover chapters for a book by actually listing files in GCS
  * Excludes description files (description.json and description.mp3) from chapters
  */
+/**
+ * Extract audio duration from a URL using music-metadata
+ * @param {string} audioUrl - URL to the audio file
+ * @returns {Promise<number|null>} Duration in seconds, or null if failed
+ */
+async function getAudioDuration(audioUrl) {
+  try {
+    // Fetch audio file as a stream
+    const response = await axios({
+      method: 'get',
+      url: audioUrl,
+      responseType: 'stream',
+      timeout: 30000 // 30 second timeout
+    });
+    
+    // Parse metadata from stream
+    const metadata = await parseStream(response.data, {
+      mimeType: 'audio/m4a'
+    });
+    
+    // Return duration in seconds
+    if (metadata.format && metadata.format.duration) {
+      return metadata.format.duration;
+    }
+    
+    logger.warn(`No duration found in metadata for ${audioUrl}`);
+    return null;
+  } catch (error) {
+    logger.error(`Failed to extract duration for ${audioUrl}:`, error.message);
+    return null;
+  }
+}
+
 async function discoverChapters(isbn, bucket) {
   // List all files in the ISBN folder
   const [files] = await bucket.getFiles({ prefix: `${isbn}/` });
@@ -167,14 +201,32 @@ async function discoverChapters(isbn, bucket) {
   // Sort chapters intelligently
   const sortedChapters = sortChapters(validChapters);
   
-  // Build chapter objects
-  const chapters = sortedChapters.map((name, index) => ({
-    id: `${isbn}-${name}`,
-    title: formatChapterTitle(name),
-    audioUrl: `${BASE_URL}/${BUCKET_NAME}/${isbn}/${name}.m4a`,
-    jsonUrl: `${BASE_URL}/${BUCKET_NAME}/${isbn}/${name}.json`,
-    order: index
-  }));
+  // Build chapter objects with duration extraction
+  const chapters = [];
+  for (let index = 0; index < sortedChapters.length; index++) {
+    const name = sortedChapters[index];
+    const audioUrl = `${BASE_URL}/${BUCKET_NAME}/${isbn}/${name}.m4a`;
+    
+    // Extract duration for this chapter
+    logger.info(`Extracting duration for chapter: ${name}`);
+    const duration = await getAudioDuration(audioUrl);
+    
+    const chapter = {
+      id: `${isbn}-${name}`,
+      title: formatChapterTitle(name),
+      audioUrl: audioUrl,
+      jsonUrl: `${BASE_URL}/${BUCKET_NAME}/${isbn}/${name}.json`,
+      order: index
+    };
+    
+    // Only add duration if successfully extracted
+    if (duration !== null) {
+      chapter.duration = duration;
+      logger.info(`Chapter ${name} duration: ${Math.round(duration / 60)} minutes`);
+    }
+    
+    chapters.push(chapter);
+  }
   
   return chapters;
 }
@@ -226,6 +278,14 @@ function sortChapters(chapterNames) {
     if (lower.includes('afterword')) return { priority: 1000, subOrder: 1 };
     if (lower.includes('conclusion')) return { priority: 1000, subOrder: 2 };
     if (lower.includes('appendix')) return { priority: 1000, subOrder: 3 };
+    
+    // Check for explicit ordering suffix like (1), (2), (3) at the end
+    // This is used for chapters with arbitrary names that need manual ordering
+    // e.g., "The Beginning (1)", "A New World (2)", "TheNugget(1)"
+    const orderMatch = name.match(/\((\d+)\)$/);
+    if (orderMatch) {
+      return { priority: 100, subOrder: parseInt(orderMatch[1], 10) };
+    }
     
     // Main content - extract numbers
     const numbers = extractNumbers(name);
@@ -329,6 +389,10 @@ function parseWordNumber(str) {
  * Format chapter name into a readable title
  */
 function formatChapterTitle(name) {
+  // Strip explicit ordering suffix like (1), (2), (3) - used for ordering, not display
+  // Handles both "Name (1)" and "Name(1)" formats
+  name = name.replace(/\s*\(\d+\)$/, '');
+  
   const lower = name.toLowerCase().replace(/[-_]/g, ' ');
   
   // Handle special names
@@ -2091,6 +2155,943 @@ exports.getVocab = onRequest(
 
     } catch (error) {
       logger.error('Error in getVocab:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================================================
+// Learning Path: Book Enrichment API
+// ============================================================================
+
+/**
+ * Initialize OpenAI client
+ */
+function getOpenAIClient() {
+  const OpenAI = require('openai');
+  return new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+  });
+}
+
+/**
+ * POST /enrichBookMetadata/{isbn}
+ * Uses OpenAI to analyze a book and generate series/genre/theme data
+ * 
+ * This enriches a single book with:
+ * - Series information (name, position, total books, all ISBNs)
+ * - Genre tags (3-5 genres)
+ * - Theme tags (3-5 themes)
+ * - Related book ISBNs (similar books)
+ */
+exports.enrichBookMetadata = onRequest(
+  {
+    region: 'australia-southeast1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 120,
+    memory: '512MiB'
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const pathParts = extractPathParams(req, 1);
+      const isbn = pathParts[0];
+      
+      if (!isbn) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing ISBN. URL format: /enrichBookMetadata/{isbn}'
+        });
+      }
+      
+      logger.info(`📚 Enriching book metadata for ISBN: ${isbn}`);
+      
+      // Set OpenAI API key from secret
+      process.env.OPENAI_API_KEY = openaiApiKey.value();
+      
+      const db = admin.firestore();
+      
+      // Get book from Firestore
+      const bookDoc = await db.collection('books').doc(isbn).get();
+      if (!bookDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error: `Book ${isbn} not found in catalogue`
+        });
+      }
+      
+      const bookData = bookDoc.data();
+      const title = bookData.title || 'Unknown Title';
+      const author = bookData.author || 'Unknown Author';
+      const description = bookData.description || '';
+      
+      // Call OpenAI to analyze the book
+      const openai = getOpenAIClient();
+      
+      const prompt = `Analyze this book and provide detailed metadata in JSON format.
+
+BOOK INFORMATION:
+- Title: ${title}
+- Author: ${author}
+- ISBN: ${isbn}
+- Description: ${description || 'No description available'}
+
+INSTRUCTIONS:
+1. Determine if this book is part of a series. If yes, provide the series name, this book's position (1-indexed), total number of books in the series, and ISBNs of ALL books in the series in order.
+2. Identify 3-5 relevant genre tags (lowercase, hyphenated for multi-word, e.g., "self-help", "young-adult", "science-fiction")
+3. Identify 3-5 thematic tags that describe the book's themes (lowercase, e.g., "survival", "personal-growth", "leadership")
+4. Suggest 3-5 ISBNs of similar/related books that readers might enjoy
+
+IMPORTANT:
+- For series detection, be thorough. Look for common series patterns in the title.
+- ISBNs should be ISBN-10 format (10 digits) when possible.
+- If you're not certain about series information, set series to null.
+- Only include genres and themes you're confident about.
+
+Return ONLY valid JSON in this exact format:
+{
+  "series": {
+    "name": "Series Name or null",
+    "position": 1,
+    "totalBooks": 3,
+    "allIsbns": ["isbn1", "isbn2", "isbn3"]
+  },
+  "genres": ["genre1", "genre2", "genre3"],
+  "themes": ["theme1", "theme2", "theme3"],
+  "relatedIsbns": ["isbn1", "isbn2", "isbn3"]
+}
+
+If the book is NOT part of a series, set "series" to null.`;
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a book metadata expert. You analyze books and provide accurate series information, genre tags, themes, and related book recommendations. Always return valid JSON.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 1000
+      });
+      
+      const responseText = completion.choices[0]?.message?.content || '';
+      
+      // Parse the JSON response
+      let enrichedData;
+      try {
+        // Extract JSON from response (handle markdown code blocks)
+        let jsonStr = responseText;
+        const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) {
+          jsonStr = jsonMatch[1].trim();
+        }
+        enrichedData = JSON.parse(jsonStr);
+      } catch (parseError) {
+        logger.error(`Failed to parse OpenAI response: ${responseText}`);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to parse AI response',
+          rawResponse: responseText
+        });
+      }
+      
+      // Build the enrichedData object for Firestore
+      const firestoreEnrichedData = {
+        genres: enrichedData.genres || [],
+        themes: enrichedData.themes || [],
+        relatedIsbns: enrichedData.relatedIsbns || [],
+        enrichedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+      
+      // Add series if present and valid
+      if (enrichedData.series && enrichedData.series.name) {
+        firestoreEnrichedData.series = {
+          name: enrichedData.series.name,
+          position: enrichedData.series.position || 1,
+          totalBooks: enrichedData.series.totalBooks || 1,
+          allIsbns: enrichedData.series.allIsbns || [isbn]
+        };
+      }
+      
+      // Update book document with enrichedData
+      await db.collection('books').doc(isbn).update({
+        enrichedData: firestoreEnrichedData
+      });
+      
+      logger.info(`✅ Successfully enriched book: ${isbn} - ${title}`);
+      
+      res.json({
+        success: true,
+        isbn: isbn,
+        title: title,
+        enrichedData: firestoreEnrichedData
+      });
+      
+    } catch (error) {
+      logger.error('Error in enrichBookMetadata:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/**
+ * POST /enrichAllBooks
+ * Batch process all books in the catalogue with AI enrichment
+ * 
+ * Query parameters:
+ * - forceUpdate=true : Re-enrich books even if they already have enrichedData
+ */
+exports.enrichAllBooks = onRequest(
+  {
+    region: 'australia-southeast1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 540, // 9 minutes max
+    memory: '1GiB'
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const forceUpdate = req.query.forceUpdate === 'true';
+      
+      logger.info(`📚 Starting batch book enrichment (forceUpdate: ${forceUpdate})`);
+      
+      // Set OpenAI API key from secret
+      process.env.OPENAI_API_KEY = openaiApiKey.value();
+      
+      const db = admin.firestore();
+      const openai = getOpenAIClient();
+      
+      // Get all books
+      const booksSnapshot = await db.collection('books').get();
+      
+      const results = [];
+      let processed = 0;
+      let skipped = 0;
+      let errors = 0;
+      
+      for (const bookDoc of booksSnapshot.docs) {
+        const bookData = bookDoc.data();
+        const isbn = bookDoc.id;
+        const title = bookData.title || 'Unknown';
+        const author = bookData.author || 'Unknown';
+        const description = bookData.description || '';
+        
+        // Skip if already enriched (unless forceUpdate)
+        if (bookData.enrichedData && !forceUpdate) {
+          results.push({ isbn, title, status: 'skipped', reason: 'already enriched' });
+          skipped++;
+          continue;
+        }
+        
+        try {
+          logger.info(`Processing: ${isbn} - ${title}`);
+          
+          // Call OpenAI
+          const prompt = `Analyze this book and provide metadata in JSON format.
+
+BOOK: "${title}" by ${author}
+ISBN: ${isbn}
+Description: ${description || 'No description'}
+
+Return JSON with:
+- series: {name, position, totalBooks, allIsbns} or null if standalone
+- genres: array of 3-5 genre tags (lowercase, hyphenated)
+- themes: array of 3-5 theme tags (lowercase)
+- relatedIsbns: array of 3-5 similar book ISBNs
+
+Return ONLY valid JSON.`;
+
+          const completion = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: 'You are a book metadata expert. Return only valid JSON.' },
+              { role: 'user', content: prompt }
+            ],
+            temperature: 0.3,
+            max_tokens: 800
+          });
+          
+          const responseText = completion.choices[0]?.message?.content || '';
+          
+          // Parse response
+          let enrichedData;
+          try {
+            let jsonStr = responseText;
+            const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1].trim();
+            enrichedData = JSON.parse(jsonStr);
+          } catch (parseError) {
+            throw new Error(`JSON parse failed: ${responseText.substring(0, 200)}`);
+          }
+          
+          // Build Firestore data
+          const firestoreData = {
+            genres: enrichedData.genres || [],
+            themes: enrichedData.themes || [],
+            relatedIsbns: enrichedData.relatedIsbns || [],
+            enrichedAt: admin.firestore.FieldValue.serverTimestamp()
+          };
+          
+          if (enrichedData.series && enrichedData.series.name) {
+            firestoreData.series = {
+              name: enrichedData.series.name,
+              position: enrichedData.series.position || 1,
+              totalBooks: enrichedData.series.totalBooks || 1,
+              allIsbns: enrichedData.series.allIsbns || [isbn]
+            };
+          }
+          
+          // Update book
+          await db.collection('books').doc(isbn).update({
+            enrichedData: firestoreData
+          });
+          
+          results.push({ 
+            isbn, 
+            title, 
+            status: 'success',
+            hasSeries: !!firestoreData.series,
+            genreCount: firestoreData.genres.length
+          });
+          processed++;
+          
+          // Rate limiting delay (OpenAI has rate limits)
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          
+        } catch (bookError) {
+          logger.error(`Error enriching ${isbn}:`, bookError);
+          results.push({ isbn, title, status: 'error', error: bookError.message });
+          errors++;
+        }
+      }
+      
+      logger.info(`✅ Batch enrichment complete: ${processed} processed, ${skipped} skipped, ${errors} errors`);
+      
+      res.json({
+        success: true,
+        summary: {
+          total: booksSnapshot.docs.length,
+          processed,
+          skipped,
+          errors
+        },
+        results
+      });
+      
+    } catch (error) {
+      logger.error('Error in enrichAllBooks:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================================================
+// Learning Path: Path Generation API
+// ============================================================================
+
+/**
+ * Search Google Books API for book information
+ * @param {string} query - Search query (title, author, or ISBN)
+ * @returns {object|null} - Book info or null if not found
+ */
+async function searchGoogleBooks(query) {
+  try {
+    const response = await axios.get(
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=5`,
+      { timeout: 10000 }
+    );
+    
+    if (!response.data.items || response.data.items.length === 0) {
+      return null;
+    }
+    
+    // Return the first result
+    const item = response.data.items[0];
+    const volumeInfo = item.volumeInfo;
+    
+    // Extract ISBN
+    let isbn10 = null;
+    let isbn13 = null;
+    if (volumeInfo.industryIdentifiers) {
+      const isbn10Obj = volumeInfo.industryIdentifiers.find(id => id.type === 'ISBN_10');
+      const isbn13Obj = volumeInfo.industryIdentifiers.find(id => id.type === 'ISBN_13');
+      if (isbn10Obj) isbn10 = isbn10Obj.identifier;
+      if (isbn13Obj) isbn13 = isbn13Obj.identifier;
+    }
+    
+    return {
+      isbn: isbn10 || isbn13 || null,
+      isbn10,
+      isbn13,
+      title: volumeInfo.title || 'Unknown Title',
+      author: volumeInfo.authors?.[0] || 'Unknown Author',
+      description: volumeInfo.description || null,
+      coverUrl: volumeInfo.imageLinks?.thumbnail?.replace('http://', 'https://') || null,
+      publisher: volumeInfo.publisher || null,
+      publishedDate: volumeInfo.publishedDate || null
+    };
+  } catch (error) {
+    logger.error(`Google Books search error for "${query}":`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Search Google Books by ISBN specifically
+ */
+async function searchGoogleBooksByIsbn(isbn) {
+  return searchGoogleBooks(`isbn:${isbn}`);
+}
+
+/**
+ * Get or create a phantom book entry
+ */
+async function getOrCreatePhantomBook(db, isbn, bookInfo, seriesInfo = null) {
+  const phantomRef = db.collection('phantomBooks').doc(isbn);
+  const existing = await phantomRef.get();
+  
+  if (existing.exists) {
+    return existing.data();
+  }
+  
+  // Create new phantom book
+  const phantomData = {
+    isbn,
+    title: bookInfo.title,
+    author: bookInfo.author,
+    description: bookInfo.description || null,
+    coverUrl: bookInfo.coverUrl || null,
+    source: 'google-books',
+    available: false,
+    estimatedAvailability: '2026',
+    publisher: bookInfo.publisher || null,
+    publishedDate: bookInfo.publishedDate || null,
+    createdAt: admin.firestore.FieldValue.serverTimestamp()
+  };
+  
+  if (seriesInfo) {
+    phantomData.series = seriesInfo;
+  }
+  
+  await phantomRef.set(phantomData);
+  logger.info(`Created phantom book: ${isbn} - ${bookInfo.title}`);
+  
+  return phantomData;
+}
+
+/**
+ * POST /generateLearningPath
+ * Creates a personalized 5-book reading path for a user
+ * 
+ * Request body:
+ * {
+ *   "userId": "firebase-uid",
+ *   "startingBookIsbn": "0123456789",
+ *   "preferences": {
+ *     "genres": ["self-help", "business"],
+ *     "booksPerMonth": 2
+ *   }
+ * }
+ */
+exports.generateLearningPath = onRequest(
+  {
+    region: 'australia-southeast1',
+    secrets: [openaiApiKey],
+    timeoutSeconds: 180,
+    memory: '1GiB'
+  },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      // Parse request body
+      const { userId, startingBookIsbn, preferences } = req.body;
+      
+      if (!userId || !startingBookIsbn) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: userId, startingBookIsbn'
+        });
+      }
+      
+      logger.info(`🎯 Generating Learning Path for user ${userId}, starting with ${startingBookIsbn}`);
+      
+      // Set OpenAI API key from secret
+      process.env.OPENAI_API_KEY = openaiApiKey.value();
+      
+      const db = admin.firestore();
+      const openai = getOpenAIClient();
+      
+      // Get the starting book from catalogue
+      const startingBookDoc = await db.collection('books').doc(startingBookIsbn).get();
+      
+      let startingBook;
+      let isStartingBookAvailable = true;
+      
+      if (startingBookDoc.exists) {
+        startingBook = startingBookDoc.data();
+      } else {
+        // Starting book not in catalogue - search Google Books
+        const googleBookInfo = await searchGoogleBooksByIsbn(startingBookIsbn);
+        if (!googleBookInfo) {
+          return res.status(404).json({
+            success: false,
+            error: `Book ${startingBookIsbn} not found in catalogue or Google Books`
+          });
+        }
+        startingBook = googleBookInfo;
+        isStartingBookAvailable = false;
+        
+        // Create phantom book entry
+        await getOrCreatePhantomBook(db, startingBookIsbn, startingBook);
+      }
+      
+      // Initialize path books array
+      const pathBooks = [];
+      const usedIsbns = new Set([startingBookIsbn]);
+      
+      // Position 1: Starting book
+      pathBooks.push({
+        isbn: startingBookIsbn,
+        title: startingBook.title,
+        author: startingBook.author,
+        coverUrl: startingBook.coverUrl || null,
+        position: 1,
+        status: 'reading',
+        available: isStartingBookAvailable,
+        reason: 'Your chosen starting book',
+        seriesInfo: startingBook.enrichedData?.series || null
+      });
+      
+      // Get all books in our catalogue for availability checking
+      const catalogueSnapshot = await db.collection('books').get();
+      const catalogueIsbns = new Set(catalogueSnapshot.docs.map(doc => doc.id));
+      
+      // Check if starting book is part of a series
+      const seriesInfo = startingBook.enrichedData?.series;
+      
+      // PRIORITY 1: Add remaining series books (if applicable)
+      if (seriesInfo && seriesInfo.allIsbns && seriesInfo.allIsbns.length > 1) {
+        logger.info(`📖 Book is part of series: ${seriesInfo.name} (position ${seriesInfo.position} of ${seriesInfo.totalBooks})`);
+        
+        // Get remaining books in series order
+        const remainingSeriesIsbns = seriesInfo.allIsbns.filter(
+          (isbn, index) => index >= seriesInfo.position && !usedIsbns.has(isbn)
+        );
+        
+        for (const seriesIsbn of remainingSeriesIsbns) {
+          if (pathBooks.length >= 5) break;
+          
+          // Check if in catalogue
+          const inCatalogue = catalogueIsbns.has(seriesIsbn);
+          let bookInfo;
+          
+          if (inCatalogue) {
+            const bookDoc = await db.collection('books').doc(seriesIsbn).get();
+            bookInfo = bookDoc.data();
+          } else {
+            // Fetch from Google Books
+            bookInfo = await searchGoogleBooksByIsbn(seriesIsbn);
+            if (bookInfo) {
+              await getOrCreatePhantomBook(db, seriesIsbn, bookInfo, {
+                name: seriesInfo.name,
+                position: seriesInfo.allIsbns.indexOf(seriesIsbn) + 1,
+                totalBooks: seriesInfo.totalBooks,
+                allIsbns: seriesInfo.allIsbns
+              });
+            }
+          }
+          
+          if (bookInfo) {
+            const position = seriesInfo.allIsbns.indexOf(seriesIsbn) + 1;
+            pathBooks.push({
+              isbn: seriesIsbn,
+              title: bookInfo.title,
+              author: bookInfo.author,
+              coverUrl: bookInfo.coverUrl || null,
+              position: pathBooks.length + 1,
+              status: 'upcoming',
+              available: inCatalogue,
+              reason: `Book ${position} in the ${seriesInfo.name} series`,
+              seriesInfo: {
+                name: seriesInfo.name,
+                position,
+                totalBooks: seriesInfo.totalBooks,
+                allIsbns: seriesInfo.allIsbns
+              }
+            });
+            usedIsbns.add(seriesIsbn);
+          }
+        }
+      }
+      
+      // PRIORITY 2: Same author books (if we need more books)
+      if (pathBooks.length < 5) {
+        // Find other books by same author in catalogue
+        const authorBooks = catalogueSnapshot.docs
+          .filter(doc => {
+            const data = doc.data();
+            return data.author === startingBook.author && !usedIsbns.has(doc.id);
+          })
+          .slice(0, 5 - pathBooks.length);
+        
+        for (const authorBookDoc of authorBooks) {
+          if (pathBooks.length >= 5) break;
+          
+          const bookData = authorBookDoc.data();
+          pathBooks.push({
+            isbn: authorBookDoc.id,
+            title: bookData.title,
+            author: bookData.author,
+            coverUrl: bookData.coverUrl || null,
+            position: pathBooks.length + 1,
+            status: 'upcoming',
+            available: true,
+            reason: `Another book by ${startingBook.author}`,
+            seriesInfo: bookData.enrichedData?.series || null
+          });
+          usedIsbns.add(authorBookDoc.id);
+        }
+      }
+      
+      // PRIORITY 3: Use AI to recommend remaining books
+      if (pathBooks.length < 5) {
+        const slotsNeeded = 5 - pathBooks.length;
+        const userGenres = preferences?.genres || [];
+        
+        logger.info(`🤖 Using AI to fill ${slotsNeeded} remaining slots`);
+        
+        // Build context for AI
+        const currentBooks = pathBooks.map(b => `"${b.title}" by ${b.author}`).join(', ');
+        const availableBooksInCatalogue = catalogueSnapshot.docs
+          .filter(doc => !usedIsbns.has(doc.id))
+          .map(doc => {
+            const data = doc.data();
+            return `ISBN: ${doc.id}, Title: "${data.title}", Author: ${data.author}, Genres: ${data.enrichedData?.genres?.join(', ') || 'unknown'}`;
+          })
+          .join('\n');
+        
+        const aiPrompt = `You are a book recommendation expert. A user is building a reading path.
+
+CURRENT READING PATH:
+${currentBooks}
+
+USER'S PREFERRED GENRES: ${userGenres.join(', ') || 'Not specified'}
+
+BOOKS AVAILABLE IN OUR CATALOGUE (prefer these):
+${availableBooksInCatalogue || 'No additional books available'}
+
+TASK: Recommend exactly ${slotsNeeded} more book(s) that would complement this reading path. 
+- Prioritize books from the catalogue list above
+- If catalogue books don't fit well, suggest other books (we'll mark them as "coming soon")
+- Focus on similar themes, genres, or books that readers of the current path would enjoy
+- For each book, explain why it's a good fit in 1 sentence
+
+Return JSON array:
+[
+  {
+    "isbn": "book-isbn-or-search-term",
+    "title": "Book Title",
+    "author": "Author Name",
+    "reason": "Why this book fits the path",
+    "inCatalogue": true/false
+  }
+]`;
+
+        try {
+          const completion = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: 'You are a book recommendation expert. Return only valid JSON arrays.' },
+              { role: 'user', content: aiPrompt }
+            ],
+            temperature: 0.5,
+            max_tokens: 1000
+          });
+          
+          const responseText = completion.choices[0]?.message?.content || '[]';
+          
+          // Parse AI response
+          let recommendations;
+          try {
+            let jsonStr = responseText;
+            const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+            if (jsonMatch) jsonStr = jsonMatch[1].trim();
+            recommendations = JSON.parse(jsonStr);
+          } catch (parseError) {
+            logger.error(`Failed to parse AI recommendations: ${responseText}`);
+            recommendations = [];
+          }
+          
+          // Process each recommendation
+          for (const rec of recommendations) {
+            if (pathBooks.length >= 5) break;
+            
+            let isbn = rec.isbn;
+            let bookInfo = null;
+            let inCatalogue = rec.inCatalogue;
+            
+            // Check if in catalogue
+            if (catalogueIsbns.has(isbn)) {
+              const bookDoc = await db.collection('books').doc(isbn).get();
+              bookInfo = bookDoc.data();
+              inCatalogue = true;
+            } else if (!inCatalogue) {
+              // Search Google Books
+              bookInfo = await searchGoogleBooksByIsbn(isbn);
+              if (!bookInfo) {
+                // Try searching by title
+                bookInfo = await searchGoogleBooks(`${rec.title} ${rec.author}`);
+                if (bookInfo && bookInfo.isbn) {
+                  isbn = bookInfo.isbn;
+                }
+              }
+              
+              if (bookInfo) {
+                await getOrCreatePhantomBook(db, isbn, bookInfo);
+                inCatalogue = false;
+              }
+            }
+            
+            if (bookInfo && !usedIsbns.has(isbn)) {
+              pathBooks.push({
+                isbn,
+                title: bookInfo.title || rec.title,
+                author: bookInfo.author || rec.author,
+                coverUrl: bookInfo.coverUrl || null,
+                position: pathBooks.length + 1,
+                status: 'upcoming',
+                available: inCatalogue,
+                reason: rec.reason || 'Recommended based on your reading preferences',
+                seriesInfo: bookInfo.enrichedData?.series || null
+              });
+              usedIsbns.add(isbn);
+            }
+          }
+        } catch (aiError) {
+          logger.error('AI recommendation error:', aiError);
+        }
+      }
+      
+      // Build the final learning path
+      const learningPath = {
+        books: pathBooks,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        startingBookIsbn
+      };
+      
+      // Save to user's Firestore document
+      await db.collection('users').doc(userId).collection('learningPath').doc('current').set(learningPath);
+      
+      // Also save user preferences if provided
+      if (preferences) {
+        await db.collection('users').doc(userId).collection('preferences').doc('reading').set({
+          genres: preferences.genres || [],
+          booksPerMonth: preferences.booksPerMonth || 2,
+          onboardingComplete: true,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      }
+      
+      logger.info(`✅ Generated Learning Path with ${pathBooks.length} books for user ${userId}`);
+      
+      res.json({
+        success: true,
+        userId,
+        learningPath: {
+          books: pathBooks,
+          startingBookIsbn,
+          totalBooks: pathBooks.length,
+          availableBooks: pathBooks.filter(b => b.available).length,
+          unavailableBooks: pathBooks.filter(b => !b.available).length
+        }
+      });
+      
+    } catch (error) {
+      logger.error('Error in generateLearningPath:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/**
+ * GET /getLearningPath/{userId}
+ * Retrieves the user's current learning path
+ */
+exports.getLearningPath = onRequest(
+  { region: 'australia-southeast1' },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const pathParts = extractPathParams(req, 1);
+      const userId = pathParts[0];
+      
+      if (!userId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing userId. URL format: /getLearningPath/{userId}'
+        });
+      }
+      
+      const db = admin.firestore();
+      const pathDoc = await db.collection('users').doc(userId).collection('learningPath').doc('current').get();
+      
+      if (!pathDoc.exists) {
+        return res.json({
+          success: true,
+          hasPath: false,
+          learningPath: null
+        });
+      }
+      
+      const pathData = pathDoc.data();
+      
+      res.json({
+        success: true,
+        hasPath: true,
+        learningPath: {
+          books: pathData.books || [],
+          startingBookIsbn: pathData.startingBookIsbn,
+          createdAt: pathData.createdAt?.toDate?.()?.toISOString() || null
+        }
+      });
+      
+    } catch (error) {
+      logger.error('Error in getLearningPath:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+/**
+ * POST /updateLearningPathProgress
+ * Updates the status of books in a user's learning path
+ * 
+ * Request body:
+ * {
+ *   "userId": "firebase-uid",
+ *   "isbn": "book-isbn",
+ *   "status": "completed" | "reading" | "upcoming"
+ * }
+ */
+exports.updateLearningPathProgress = onRequest(
+  { region: 'australia-southeast1' },
+  async (req, res) => {
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      return handleOptions(req, res);
+    }
+    
+    setCorsHeaders(res);
+    
+    try {
+      const { userId, isbn, status } = req.body;
+      
+      if (!userId || !isbn || !status) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: userId, isbn, status'
+        });
+      }
+      
+      const validStatuses = ['reading', 'upcoming', 'completed'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
+        });
+      }
+      
+      const db = admin.firestore();
+      const pathRef = db.collection('users').doc(userId).collection('learningPath').doc('current');
+      const pathDoc = await pathRef.get();
+      
+      if (!pathDoc.exists) {
+        return res.status(404).json({
+          success: false,
+          error: 'No learning path found for this user'
+        });
+      }
+      
+      const pathData = pathDoc.data();
+      const books = pathData.books || [];
+      
+      // Find and update the book
+      const bookIndex = books.findIndex(b => b.isbn === isbn);
+      if (bookIndex === -1) {
+        return res.status(404).json({
+          success: false,
+          error: `Book ${isbn} not found in learning path`
+        });
+      }
+      
+      // Update status
+      books[bookIndex].status = status;
+      
+      // If marking as completed, promote next upcoming book to reading
+      if (status === 'completed') {
+        const nextUpcoming = books.find(b => b.status === 'upcoming');
+        if (nextUpcoming) {
+          nextUpcoming.status = 'reading';
+        }
+      }
+      
+      // Save updated path
+      await pathRef.update({ books });
+      
+      logger.info(`Updated Learning Path: ${isbn} -> ${status} for user ${userId}`);
+      
+      res.json({
+        success: true,
+        updatedBook: books[bookIndex],
+        books
+      });
+      
+    } catch (error) {
+      logger.error('Error in updateLearningPathProgress:', error);
       res.status(500).json({
         success: false,
         error: error.message
