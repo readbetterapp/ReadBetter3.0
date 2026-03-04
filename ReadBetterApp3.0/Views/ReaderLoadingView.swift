@@ -31,6 +31,7 @@ struct ReaderLoadingView: View {
     @State private var resolvedSeekTime: Double? = nil // Resolved seek time (from param or saved progress)
     @State private var skipLoading = false // Flag to skip loading when audio is already playing
     @State private var bookCoverUrl: String? = nil // Store book cover URL for display
+    @State private var chapterTitle: String? = nil
     
     init(bookId: String, chapterNumber: Int? = nil, isDescription: Bool = false, initialSeekTime: Double? = nil) {
         self.bookId = bookId
@@ -66,6 +67,16 @@ struct ReaderLoadingView: View {
                     Spacer()
                     
                     VStack(spacing: 40) {
+                        
+                        // Chapter title
+                        
+                        if let title = chapterTitle {
+                            Text(chapterTitle ?? (chapterNumber.map { "Chapter \($0)" } ?? "Summary"))
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.top, -20)
+                        }
+                        
                         // Book cover image - large, similar to BookDetailsView
                         if let coverUrl = bookCoverUrl, let url = URL(string: coverUrl) {
                             KFImage(url)
@@ -239,11 +250,19 @@ struct ReaderLoadingView: View {
                 router.readerOverlayInitialSeekTime = resolvedSeekTime
                 
                 // Navigate back to tabs and expand the reader overlay
-                router.navigateBackToTabs()
-                
-                // Small delay to let navigation complete, then expand
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    router.expandReaderFromMiniPlayer()
+                // Expand reader overlay first, then clean up navigation stack
+                router.expandReaderFromMiniPlayer()
+                                let shouldAutoPlay = router.shouldAutoPlayOnLoad
+                                if shouldAutoPlay {
+                                    router.shouldAutoPlayOnLoad = false
+                                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    router.navigateBackToTabs()
+                    if shouldAutoPlay {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {  // longer delay — wait for nav transition
+                            OptimizedAudioPlayer.shared.play()
+                        }
+                    }
                 }
             }
         }
@@ -298,6 +317,7 @@ struct ReaderLoadingView: View {
                 audioUrl = chapter.audioUrl
                 jsonUrl = chapter.jsonUrl
             }
+            self.chapterTitle = chapter.title
             
             // Step 2: Load transcript (direct from GCS, with caching)
             loadingState = .loadingTranscript
@@ -410,17 +430,31 @@ struct ReaderLoadingView: View {
             print("   - Audio duration: \(duration) seconds")
             print("   - Explainable terms: preloading in background")
             
-            // Create preloaded data with ALL indexed data + preloaded asset
-            let preloadedData = PreloadedReaderData(
-                book: book,
-                chapter: chapter,
-                audioURL: audioURL,
-                indexedWords: indexedWords,
-                sentences: sentences,
-                totalWords: totalWords,
-                audioDuration: duration,
-                audioAsset: asset  // OPTIMIZATION: Pass preloaded asset to avoid duplicate loading
-            )
+            // Preload cover image + dominant color during loading screen
+                        var coverImage: UIImage? = nil
+                        var coverDominantColor: Color? = nil
+                        if let urlString = book.coverUrl, let url = URL(string: urlString),
+                           let data = try? Data(contentsOf: url),
+                           let image = UIImage(data: data) {
+                            coverImage = image
+                            if let dominant = image.dominantColor() {
+                                coverDominantColor = Color(dominant)
+                            }
+                        }
+                        
+                        // Create preloaded data with ALL indexed data + preloaded asset
+                        let preloadedData = PreloadedReaderData(
+                            book: book,
+                            chapter: chapter,
+                            audioURL: audioURL,
+                            indexedWords: indexedWords,
+                            sentences: sentences,
+                            totalWords: totalWords,
+                            audioDuration: duration,
+                            audioAsset: asset,
+                            coverImage: coverImage,
+                            coverDominantColor: coverDominantColor
+                        )
             
             // Step 5: Ready!
             // Update state on main thread to avoid "modifying state during view update" warning

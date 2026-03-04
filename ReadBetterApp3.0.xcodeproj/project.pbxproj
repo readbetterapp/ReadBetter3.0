@@ -11,24 +11,100 @@
 		C265A2982EF7906900F637B9 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = C265A2972EF7906900F637B9 /* FirebaseAuth */; };
 		C265A29B2EF7909800F637B9 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = C265A29A2EF7909800F637B9 /* GoogleSignIn */; };
 		C265A29D2EF7909800F637B9 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = C265A29C2EF7909800F637B9 /* GoogleSignInSwift */; };
+		C27EBBAA2F58576C004C2918 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C27EBBA92F58576C004C2918 /* WidgetKit.framework */; };
+		C27EBBAC2F58576C004C2918 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C27EBBAB2F58576C004C2918 /* SwiftUI.framework */; };
+		C27EBBBB2F58576D004C2918 /* ReadBetterWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C27EBBA72F58576C004C2918 /* ReadBetterWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C2F397E42EDBFA4B00241D39 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = C2F397572EDBF93600241D39 /* FirebaseCore */; };
 		C2F397E52EDBFA4B00241D39 /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = C2F397582EDBF93700241D39 /* FirebaseFirestore */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		C27EBBB92F58576D004C2918 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C2F397222EDBD22800241D39 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C27EBBA62F58576C004C2918;
+			remoteInfo = ReadBetterWidgetsExtension;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C27EBBC12F58576D004C2918 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C27EBBBB2F58576D004C2918 /* ReadBetterWidgetsExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		C265A6762F03777600F637B9 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
+		C27EBBA72F58576C004C2918 /* ReadBetterWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ReadBetterWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C27EBBA92F58576C004C2918 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		C27EBBAB2F58576C004C2918 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		C2F3972A2EDBD22800241D39 /* Read Better DEBUG.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Read Better DEBUG.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		C27EBBBC2F58576D004C2918 /* Exceptions for "ReadBetterWidgets" folder in "ReadBetterWidgetsExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = C27EBBA62F58576C004C2918 /* ReadBetterWidgetsExtension */;
+		};
+		C27EBBC52F5857FB004C2918 /* Exceptions for "ReadBetterApp3.0" folder in "ReadBetterWidgetsExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Components/ReadingActivityAttributes.swift,
+				Components/ReadingActivityWidget.swift,
+			);
+			target = C27EBBA62F58576C004C2918 /* ReadBetterWidgetsExtension */;
+		};
+		C27EBBC82F585819004C2918 /* Exceptions for "ReadBetterApp3.0" folder in "ReadBetterApp3.0" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Components/ReadingActivityWidget.swift,
+			);
+			target = C2F397292EDBD22800241D39 /* ReadBetterApp3.0 */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		C27EBBAD2F58576C004C2918 /* ReadBetterWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C27EBBBC2F58576D004C2918 /* Exceptions for "ReadBetterWidgets" folder in "ReadBetterWidgetsExtension" target */,
+			);
+			path = ReadBetterWidgets;
+			sourceTree = "<group>";
+		};
 		C2F3972C2EDBD22800241D39 /* ReadBetterApp3.0 */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				C27EBBC82F585819004C2918 /* Exceptions for "ReadBetterApp3.0" folder in "ReadBetterApp3.0" target */,
+				C27EBBC52F5857FB004C2918 /* Exceptions for "ReadBetterApp3.0" folder in "ReadBetterWidgetsExtension" target */,
+			);
 			path = ReadBetterApp3.0;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		C27EBBA42F58576C004C2918 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C27EBBAC2F58576C004C2918 /* SwiftUI.framework in Frameworks */,
+				C27EBBAA2F58576C004C2918 /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C2F397272EDBD22800241D39 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -45,10 +121,21 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		C27EBBA82F58576C004C2918 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				C27EBBA92F58576C004C2918 /* WidgetKit.framework */,
+				C27EBBAB2F58576C004C2918 /* SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		C2F397212EDBD22800241D39 = {
 			isa = PBXGroup;
 			children = (
 				C2F3972C2EDBD22800241D39 /* ReadBetterApp3.0 */,
+				C27EBBAD2F58576C004C2918 /* ReadBetterWidgets */,
+				C27EBBA82F58576C004C2918 /* Frameworks */,
 				C2F3972B2EDBD22800241D39 /* Products */,
 				C265A6762F03777600F637B9 /* Secrets.xcconfig */,
 			);
@@ -58,6 +145,7 @@
 			isa = PBXGroup;
 			children = (
 				C2F3972A2EDBD22800241D39 /* Read Better DEBUG.app */,
+				C27EBBA72F58576C004C2918 /* ReadBetterWidgetsExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -65,6 +153,28 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		C27EBBA62F58576C004C2918 /* ReadBetterWidgetsExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C27EBBBD2F58576D004C2918 /* Build configuration list for PBXNativeTarget "ReadBetterWidgetsExtension" */;
+			buildPhases = (
+				C27EBBA32F58576C004C2918 /* Sources */,
+				C27EBBA42F58576C004C2918 /* Frameworks */,
+				C27EBBA52F58576C004C2918 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C27EBBAD2F58576C004C2918 /* ReadBetterWidgets */,
+			);
+			name = ReadBetterWidgetsExtension;
+			packageProductDependencies = (
+			);
+			productName = ReadBetterWidgetsExtension;
+			productReference = C27EBBA72F58576C004C2918 /* ReadBetterWidgetsExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		C2F397292EDBD22800241D39 /* ReadBetterApp3.0 */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = C2F397352EDBD22900241D39 /* Build configuration list for PBXNativeTarget "ReadBetterApp3.0" */;
@@ -72,10 +182,12 @@
 				C2F397262EDBD22800241D39 /* Sources */,
 				C2F397272EDBD22800241D39 /* Frameworks */,
 				C2F397282EDBD22800241D39 /* Resources */,
+				C27EBBC12F58576D004C2918 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C27EBBBA2F58576D004C2918 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				C2F3972C2EDBD22800241D39 /* ReadBetterApp3.0 */,
@@ -100,9 +212,12 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2600;
+				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
+					C27EBBA62F58576C004C2918 = {
+						CreatedOnToolsVersion = 26.2;
+					};
 					C2F397292EDBD22800241D39 = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
@@ -128,11 +243,19 @@
 			projectRoot = "";
 			targets = (
 				C2F397292EDBD22800241D39 /* ReadBetterApp3.0 */,
+				C27EBBA62F58576C004C2918 /* ReadBetterWidgetsExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		C27EBBA52F58576C004C2918 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C2F397282EDBD22800241D39 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -143,6 +266,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		C27EBBA32F58576C004C2918 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		C2F397262EDBD22800241D39 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -151,6 +281,14 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C27EBBBA2F58576D004C2918 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C27EBBA62F58576C004C2918 /* ReadBetterWidgetsExtension */;
+			targetProxy = C27EBBB92F58576D004C2918 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		C265A2C52F0233FC00F637B9 /* Test Flight */ = {
@@ -225,7 +363,10 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ReadBetterApp3-0-Info.plist";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save quote cards to your photo library";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = audio;
@@ -248,6 +389,99 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = "Test Flight";
+		};
+		C27EBBBE2F58576D004C2918 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ReadBetterWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ReadBetterWidgets;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MAIN_BUNDLE_ID = "com.ermintupkovic.readbetter-dev";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "--MAIN-BUNDLE-ID-.ReadBetterWidgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C27EBBBF2F58576D004C2918 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ReadBetterWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ReadBetterWidgets;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MAIN_BUNDLE_ID = com.ermintupkovic.readbetter;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "--MAIN-BUNDLE-ID-.ReadBetterWidgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C27EBBC02F58576D004C2918 /* Test Flight */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ReadBetterWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ReadBetterWidgets;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MAIN_BUNDLE_ID = "com.ermintupkovic.readbetter-beta";
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "--MAIN-BUNDLE-ID-.ReadBetterWidgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = "Test Flight";
 		};
@@ -388,7 +622,10 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ReadBetterApp3-0-Info.plist";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save quote cards to your photo library";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = audio;
@@ -427,7 +664,10 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "ReadBetterApp3-0-Info.plist";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save quote cards to your photo library";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes = audio;
@@ -439,7 +679,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				"PRODUCT_BUNDLE_IDENTIFIER[sdk=*]" = com.ermintupkovic.readbetter;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ermintupkovic.readbetter;
 				PRODUCT_NAME = "Read Better App";
 				REVERSED_CLIENT_ID = "com.googleusercontent.apps.881103696873-s0kqedffamstt27q57gcdb7l5gt1n6gr";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -456,6 +696,16 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		C27EBBBD2F58576D004C2918 /* Build configuration list for PBXNativeTarget "ReadBetterWidgetsExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C27EBBBE2F58576D004C2918 /* Debug */,
+				C27EBBBF2F58576D004C2918 /* Release */,
+				C27EBBC02F58576D004C2918 /* Test Flight */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		C2F397252EDBD22800241D39 /* Build configuration list for PBXProject "ReadBetterApp3.0" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

@@ -38,6 +38,7 @@ class AppRouter: ObservableObject {
     
     /// Optional initial seek time for reader overlay (used when opening from ReaderLoadingView)
     var readerOverlayInitialSeekTime: Double? = nil
+    var shouldAutoPlayOnLoad: Bool = false
     
     func navigate(to route: AppRoute) {
         path.append(route)
@@ -84,6 +85,14 @@ class AppRouter: ObservableObject {
             }
         }
     }
+
+    func replaceTop(with route: AppRoute) {
+        backNavigationSignal += 1  // pop current reader
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            self.path.append(route)  // push new reader
+        }
+    }
+    
     
     // MARK: - Mini Player Reader Expansion
     

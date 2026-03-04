@@ -45,12 +45,54 @@ enum TextSize: String, CaseIterable, Hashable {
     }
 }
 
+// MARK: - Reader Font Enum
+enum ReaderFont: String, CaseIterable, Hashable {
+    case system = "system"
+    case newYork = "newYork"
+    case georgia = "georgia"
+    
+    var displayName: String {
+        switch self {
+        case .system: return "SF"
+        case .newYork: return "NY"
+        case .georgia: return "Geo"
+        }
+    }
+    
+    func uiFont(size: CGFloat) -> UIFont {
+        switch self {
+        case .system:
+            return UIFont.systemFont(ofSize: size, weight: .semibold)
+        case .newYork:
+            let descriptor = UIFont.systemFont(ofSize: size, weight: .semibold)
+                .fontDescriptor.withDesign(.serif) ?? UIFont.systemFont(ofSize: size, weight: .semibold).fontDescriptor
+            return UIFont(descriptor: descriptor, size: size)
+        case .georgia:
+            return UIFont(name: "Georgia-Bold", size: size) ?? UIFont.systemFont(ofSize: size, weight: .semibold)
+        }
+    }
+    
+    func swiftUIFont(size: CGFloat) -> Font {
+        switch self {
+        case .system:
+            return .system(size: size, weight: .semibold)
+        case .newYork:
+            return .system(size: size, weight: .semibold, design: .serif)
+        case .georgia:
+            return Font(UIFont(name: "Georgia-Bold", size: size) ?? UIFont.systemFont(ofSize: size, weight: .semibold))
+        }
+    }
+}
+
 // MARK: - Submenu Type Enum
 enum SubmenuType {
     case speed
     case textSize
     case highlight
     case background
+    case sleepTimer
+        case bookmarks
+        case font
 }
 
 // MARK: - Reader Background Color Enum
@@ -206,7 +248,7 @@ struct OptimizedReaderView: View {
         self.animationNamespace = animationNamespace
         self.onDismiss = onDismiss
     }
-
+    
     // MARK: - Bookmark Toast
     private struct BookmarkToast: Identifiable {
         enum Kind {
@@ -263,9 +305,9 @@ struct OptimizedReaderView: View {
     @State private var cachedLineLayoutTextSize: CGFloat = 0
     @State private var cachedLineLayoutLineSpacing: CGFloat = 0
     @State private var cachedLineLayoutRectsByWordIndex: [Int: CGRect] = [:]
-    #if DEBUG
+#if DEBUG
     @State private var showAutoScrollHUD: Bool = true
-    #endif
+#endif
     
     // MARK: - Simplified Scroll State
     enum ScrollMode {
@@ -278,19 +320,32 @@ struct OptimizedReaderView: View {
     @State private var scrollMode: ScrollMode = .none
     @State private var lastPauseScrollTime: Date? = nil
     
+    @State private var rewindTapCount: Int = 0
+    @State private var forwardTapCount: Int = 0
+    
     // Chapter navigation
     var onChapterChange: ((Int) -> Void)?
     
     // Settings state with UserDefaults persistence
     @State private var textSize: TextSize = .medium
     @State private var playbackSpeed: Double = 1.0
-    @State private var highlightColor: HighlightColor = .none
+    @State private var readerFont: ReaderFont = .system
+        @State private var highlightColor: HighlightColor = .none
     @State private var readerBackgroundColor: ReaderBackgroundColor = .light
     @State private var didLoadSettings: Bool = false
     @State private var isMenuExpanded: Bool = true
     @State private var activeSubmenu: SubmenuType? = nil
     @State private var isChapterDropdownOpen: Bool = false  // Track chapter dropdown visibility
     @State private var isOutOfSync: Bool = false  // User scrolled away from auto-synced position
+    
+    // Tap to Share
+    @State private var selectedShareText: String? = nil
+    @State private var isShareOverlayPresented: Bool = false
+    @State private var pendingChapterAdvance: Bool = false
+        
+    // Cover dominant color for reader background
+    @State private var coverDominantColor: Color? = nil
+    @State private var usesDominantColorBackground: Bool = false
     
     // Bookmarking UI
     @State private var isBookmarkEditorPresented: Bool = false
@@ -303,7 +358,17 @@ struct OptimizedReaderView: View {
     @State private var bookmarkToastTask: Task<Void, Never>? = nil
     @State private var chapterBookmarksBySentenceIndex: [Int: Double] = [:]
     @State private var isBookmarkToggleInFlight: Bool = false
-    
+    @State private var sleepTimerEndDate: Date? = nil
+    @State private var sleepTimerTask: Task<Void, Never>? = nil
+    @State private var bookmarkJumpReturnTime: Double? = nil
+
+    // Inline Note Editor
+    @State private var isNoteEditorPresented: Bool = false
+    @State private var noteEditorSentenceIndex: Int = 0
+    @State private var noteEditorText: String = ""
+    @State private var chapterNotesBySentenceIndex: [Int: String] = [:]
+    @FocusState private var isNoteFieldFocused: Bool
+
     // Explainable Terms UI
     @State private var selectedExplainableTerm: ExplainableTerm? = nil
     @State private var explainableWordIndices: Set<Int> = []
@@ -315,6 +380,7 @@ struct OptimizedReaderView: View {
     @State private var searchMatches: [SearchMatch] = []
     @State private var currentSearchMatchIndex: Int = 0
     @FocusState private var isSearchFieldFocused: Bool
+      @State private var keyboardHeight: CGFloat = 0
     
     // Header auto-hide
     @State private var isHeaderVisible: Bool = true
@@ -336,52 +402,86 @@ struct OptimizedReaderView: View {
     // UserDefaults keys
     private let textSizeKey = "readerTextSize"
     private let playbackSpeedKey = "readerPlaybackSpeed"
-    private let highlightColorKey = "readerHighlightColor"
+    private let readerFontKey = "readerFont"
+        private let highlightColorKey = "readerHighlightColor"
     private let readerBackgroundColorKey = "readerBackgroundColor"
     
     // Computed property for reader-specific theme colors
     private var readerColors: ThemeColors {
-        switch readerBackgroundColor {
-        case .light:
-            // Light mode colors
-            return ThemeColors(isDarkMode: false)
-        case .dark:
-            // Dark mode colors
-            return ThemeColors(isDarkMode: true)
-        case .cream:
-            // Light cream background
-            return ThemeColors(
-                background: Color(hex: "#F7F3E9"), // Cream
-                text: Color(hex: "#2D2D2D"), // Dark text
-                textSecondary: Color(hex: "#6B6B6B"),
-                divider: Color(hex: "#E5DCC8"),
-                card: Color(hex: "#FEFCF8"),
-                cardBorder: Color(hex: "#E5DCC8"),
-                primary: Color(hex: "#2D2D2D"), // Dark for visibility on light background
-                primaryText: Color(hex: "#FEFCF8"),
-                accent: Color(hex: "#D4A574")
-            )
-        case .blue:
-            // Darker blue background
-            return ThemeColors(
-                background: Color(hex: "#1E293B"), // Dark blue
-                text: Color(hex: "#E2E8F0"), // Light text
-                textSecondary: Color(hex: "#94A3B8"),
-                divider: Color(hex: "#334155"),
-                card: Color(hex: "#0F172A"),
-                cardBorder: Color(hex: "#334155"),
-                primary: Color(hex: "#60A5FA"),
-                primaryText: Color(hex: "#0F172A"),
-                accent: Color(hex: "#3B82F6")
-            )
+            // If dominant color background is active, derive theme from it
+            if usesDominantColorBackground, let dominant = coverDominantColor {
+                if isLightBackground {
+                    // Light dominant color — use dark text
+                    return ThemeColors(
+                        background: dominant,
+                        text: Color(hex: "#1A1A1A"),
+                        textSecondary: Color(hex: "#3A3A3A").opacity(0.7),
+                        divider: Color.black.opacity(0.15),
+                        card: Color.black.opacity(0.08),
+                        cardBorder: Color.black.opacity(0.12),
+                        primary: Color(hex: "#1A1A1A"),
+                        primaryText: Color.white,
+                        accent: Color(hex: "#1A1A1A")
+                    )
+                } else {
+                    // Dark dominant color — use light text
+                    return ThemeColors(
+                        background: dominant,
+                        text: Color.white,
+                        textSecondary: Color.white.opacity(0.6),
+                        divider: Color.white.opacity(0.15),
+                        card: Color.white.opacity(0.12),
+                        cardBorder: Color.white.opacity(0.18),
+                        primary: Color.white,
+                        primaryText: dominant,
+                        accent: Color.white.opacity(0.85)
+                    )
+                }
+            }
+            
+            switch readerBackgroundColor {
+            case .light:
+                return ThemeColors(isDarkMode: false)
+            case .dark:
+                return ThemeColors(isDarkMode: true)
+            case .cream:
+                return ThemeColors(
+                    background: Color(hex: "#F7F3E9"),
+                    text: Color(hex: "#2D2D2D"),
+                    textSecondary: Color(hex: "#6B6B6B"),
+                    divider: Color(hex: "#E5DCC8"),
+                    card: Color(hex: "#FEFCF8"),
+                    cardBorder: Color(hex: "#E5DCC8"),
+                    primary: Color(hex: "#2D2D2D"),
+                    primaryText: Color(hex: "#FEFCF8"),
+                    accent: Color(hex: "#D4A574")
+                )
+            case .blue:
+                return ThemeColors(
+                    background: Color(hex: "#1E293B"),
+                    text: Color(hex: "#E2E8F0"),
+                    textSecondary: Color(hex: "#94A3B8"),
+                    divider: Color(hex: "#334155"),
+                    card: Color(hex: "#0F172A"),
+                    cardBorder: Color(hex: "#334155"),
+                    primary: Color(hex: "#60A5FA"),
+                    primaryText: Color(hex: "#0F172A"),
+                    accent: Color(hex: "#3B82F6")
+                )
+            }
         }
-    }
     
     // Helper to check if current background is light
     private var isLightBackground: Bool {
-        readerBackgroundColor == .light || readerBackgroundColor == .cream
+        if usesDominantColorBackground, let dominant = coverDominantColor {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            UIColor(dominant).getRed(&r, green: &g, blue: &b, alpha: &a)
+            let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            return luminance > 0.5
+        }
+        return readerBackgroundColor == .light || readerBackgroundColor == .cream
     }
-
+    
     private var bookmarkMarkerColor: Color {
         highlightColor == .none ? readerColors.accent : highlightColor.color
     }
@@ -413,7 +513,7 @@ struct OptimizedReaderView: View {
         return preloadedData.book.chapters.count > 1
     }
     
-    #if DEBUG
+#if DEBUG
     private var autoScrollDebugOverlay: some View {
         let sentenceIsZero = currentSentenceFrame == .zero
         let isLong = currentSentenceFrame.height > fieldOfViewHeight
@@ -454,373 +554,423 @@ struct OptimizedReaderView: View {
         .padding(.leading, 8)
         .allowsHitTesting(false)
     }
-    #endif
+#endif
     
-    var body: some View {
+    // Computed property to resolve background color
+    private var effectiveBackgroundColor: Color {
+        if usesDominantColorBackground {
+            return coverDominantColor ?? readerColors.background
+        } else {
+            return readerColors.background
+        }
+    }
+    
+    private var backgroundLayer: some View {
+        let animation: Animation? = didLoadSettings ? .easeInOut(duration: 0.4) : nil
+        return effectiveBackgroundColor
+            .ignoresSafeArea()
+            .animation(animation, value: readerBackgroundColor)
+            .animation(animation, value: usesDominantColorBackground)
+    }
+    
+    private var scrollContent: some View {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 20) {
+                        ForEach(Array(preloadedData.sentences.enumerated()), id: \.element.id) { index, sentence in
+                            OptimizedSentenceView(
+                                sentence: sentence,
+                                sentenceIndex: index,
+                                isBookmarked: chapterBookmarksBySentenceIndex[index] != nil,
+                                hasNote: { let n = chapterNotesBySentenceIndex[index]; return n != nil && !n!.isEmpty }(),
+                                currentSentenceIndex: currentSentenceIndex,
+                                scrollIDSuffix: readerBackgroundColor.rawValue,
+                                lineMarkerID: sentenceLineMarkerScrollID(index),
+                                lineMarkerOffsetY: lineScrollMarkerOffsetY,
+                                currentWordIndex: karaokeEngine.currentWordIndex,
+                                lastSpokenWordIndex: karaokeEngine.lastSpokenWordIndex,
+                                themeColors: readerColors,
+                                textSize: textSize.fontSize,
+                                                                readerFont: readerFont,
+                                                                highlightColor: highlightColor,
+                                indexedWords: preloadedData.indexedWords,
+                                explainableWordIndices: explainableWordIndices,
+                                searchMatches: searchMatches.filter { $0.sentenceIndex == index }.map { $0.range },
+                                currentSearchMatchIndex: {
+                                    // Check if the current global search match is in this sentence
+                                    guard currentSearchMatchIndex < searchMatches.count,
+                                          searchMatches[currentSearchMatchIndex].sentenceIndex == index else {
+                                        return nil
+                                    }
+                                    // Find which position this match is within this sentence's matches
+                                    let matchesInThisSentence = searchMatches.enumerated().filter { $0.element.sentenceIndex == index }
+                                    return matchesInThisSentence.firstIndex(where: { $0.offset == currentSearchMatchIndex })
+                                }(),
+                                containerWidth: scrollViewWidth - 40, // Account for horizontal padding
+                                onSentenceTap: {
+                                                                           // Reset timer if header visible, but don't reopen if hidden
+                                                                           handleUserInteraction(shouldReopen: false)
+                                                                           
+                                                                           // Tap-to-seek: jump to sentence's start time
+                                                                           let seekTime = sentence.startTime
+                                                                           let tappedIndex = index
+                                                                           
+                                                                           Task { @MainActor in
+                                                                               let actualTime = await audioPlayer.seekAndWait(to: seekTime)
+                                                                               
+                                                                               karaokeEngine.resetSearchState()
+                                                                               karaokeEngine.updateTime(actualTime, duration: audioPlayer.duration)
+                                                                               
+                                                                               currentSentenceIndex = tappedIndex
+                                                                               isOutOfSync = false
+                                                                               
+                                                                               hapticGenerator?.impactOccurred(intensity: 0.5)
+                                                                               
+                                                                               jumpToSyncPosition(time: actualTime)
+                                                                           }
+                                                                       },
+                                onSentenceLongPress: {
+                                    guard !isShareOverlayPresented else { return }
+                                    selectedShareText = sentence.text
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                        isShareOverlayPresented = true
+                                    }
+                                },
+                                                                       onExplainableWordTap: { wordIndex in
+                                    // Show explanation overlay for the tapped explainable word
+                                    if let term = ExplainableTermsService.shared.getTerm(at: wordIndex, chapterId: preloadedData.chapter.id) {
+                                        selectedExplainableTerm = term
+                                        showExplanationOverlay = true
+                                        hapticGenerator?.impactOccurred(intensity: 0.3)
+                                    }
+                                }
+                            )
+                            .equatable() // Use Equatable to prevent unnecessary re-renders
+                            .id("\(index)-\(readerBackgroundColor.rawValue)")
+                            .padding(.bottom, index == preloadedData.sentences.count - 1 ? screenHeight * 0.4 : 0)
+                            .background(
+                                // CRITICAL FIX: Always measure, but only write preference for current sentence
+                                // This prevents GeometryReader from appearing/disappearing during layout (which causes warnings)
+                                GeometryReader { geometry in
+                                    Color.clear
+                                        .preference(
+                                            key: SentencePositionPreferenceKey.self,
+                                            value: index == currentSentenceIndex
+                                            ? geometry.frame(in: .named("scroll"))
+                                            : .zero  // Only write non-zero for current sentence (handler ignores .zero)
+                                        )
+                                }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, scrollContentVerticalPadding + (isMenuExpanded ? 0 : 50))
+                    .padding(.bottom, playbackControlsHeight + 24) // Extra bottom padding so content can scroll under controls
+                }
+                // IMPORTANT: Measure the actual visible ScrollView viewport (not content geometry).
+                .background(
+                    GeometryReader { viewportGeo in
+                        Color.clear
+                            .onAppear {
+                                scrollViewHeight = viewportGeo.size.height
+                                scrollViewWidth = viewportGeo.size.width
+                            }
+                            .onChange(of: viewportGeo.size.height) { _, h in
+                                scrollViewHeight = h
+                            }
+                            .onChange(of: viewportGeo.size.width) { _, w in
+                                scrollViewWidth = w
+                            }
+                    }
+                )
+                .coordinateSpace(name: "scroll")
+                .scrollIndicators(.hidden)
+                // Tap to show header
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    handleUserInteraction()
+                }
+                // Detect user-driven scroll to mark out-of-sync
+                .simultaneousGesture(
+                    // Avoid marking out-of-sync on incidental taps; require a real drag.
+                    DragGesture(minimumDistance: 10)
+                        .updating($isUserDraggingScroll) { _, state, _ in
+                            state = true
+                        }
+                        .onChanged { _ in
+                            // Only mark out-of-sync when user scrolls (not scrubbing)
+                            guard !isScrubbing else { return }
+                            isOutOfSync = true
+                        }
+                )
+                .overlay(
+                    // Track scroll offset for proper coordinate calculations
+                    GeometryReader { scrollOffsetGeometry in
+                        Color.clear
+                            .preference(
+                                key: ScrollOffsetPreferenceKey.self,
+                                value: scrollOffsetGeometry.frame(in: .named("scroll")).minY
+                            )
+                    }
+                        .frame(height: 0)
+                )
+                .onAppear {
+                    // Initialize scroll mode
+                    scrollMode = audioPlayer.isPlaying ? .playing : .paused
+                    
+                    // Store proxy reference for use outside ScrollViewReader scope
+                    scrollProxy = proxy
+                    
+                    // If we need to scroll to current position
+                    if shouldScrollToCurrentOnAppear {
+                        shouldScrollToCurrentOnAppear = false
+                        
+                        
+                        // Scroll to current sentence after a brief delay to let layout settle
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            // Try to get sentence from karaoke engine first (already playing case)
+                            if let wordIndex = karaokeEngine.currentWordIndex,
+                               let sentenceIndex = wordToSentenceMap[wordIndex] {
+                                currentSentenceIndex = sentenceIndex
+                                proxy.scrollTo(sentenceScrollID(sentenceIndex), anchor: .center)
+                                print("⚡ Scrolled to sentence \(sentenceIndex) for word \(wordIndex)")
+                            }
+                            // Otherwise use currentSentenceIndex if it was set (fresh load with seek)
+                            else if currentSentenceIndex > 0 {
+                                proxy.scrollTo(sentenceScrollID(currentSentenceIndex), anchor: .center)
+                                print("⚡ Scrolled to pre-set sentence \(currentSentenceIndex)")
+                            }
+                            // Or check if we have initialSeekTime and find the sentence
+                            else if let seekTime = initialSeekTime, seekTime > 0,
+                                    let sentenceIndex = findSentenceAtTime(seekTime) {
+                                currentSentenceIndex = sentenceIndex
+                                proxy.scrollTo(sentenceScrollID(sentenceIndex), anchor: .center)
+                                print("⚡ Scrolled to sentence \(sentenceIndex) for initialSeekTime \(seekTime)")
+                            }
+                        }
+                    }
+                }
+                .onPreferenceChange(SentencePositionPreferenceKey.self) { frame in
+                    // Only update frame if it's valid and for the current sentence
+                    // This prevents false updates from other sentences
+                    guard frame != .zero else { return }
+                    DispatchQueue.main.async {
+                        currentSentenceFrame = frame
+                        // #region agent log
+                        agentDebugLog("H1", "OptimizedReaderView.swift:SentencePositionPreference", "updated currentSentenceFrame", [
+                            "frameMinY": frame.minY,
+                            "frameHeight": frame.height,
+                            "currentSentenceIndex": currentSentenceIndex
+                        ])
+                        // #endregion agent log
+                        
+                        // SINGLE-SOURCE centering decision: center only if measured height fits band.
+                        // Note: Long sentences with word targets are now handled directly in jumpToSyncPosition
+                        // to avoid double-jump. This handler only deals with short sentence centering.
+                        if let pending = pendingCenterSentenceIndex, pending == currentSentenceIndex {
+                            defer {
+                                pendingCenterSentenceIndex = nil
+                                pendingResyncWordIndex = nil
+                            }
+                            
+                            guard let proxy = scrollProxy else { return }
+                            
+                            let sentenceID = sentenceScrollID(pending)
+                            
+                            if frame.height <= fieldOfViewHeight {
+                                // Short sentence: already centered by autoScrollOnSentenceAdvance.
+                                // Re-center here in case the initial scroll was approximate.
+                                scrollWithAnimation {
+                                    proxy.scrollTo(sentenceID, anchor: .center)
+                                }
+                            } else {
+                                // Long sentence: position top just below the status bar.
+                                // Use the 1px line marker (at offset 0 = sentence top).
+                                // Since the marker is tiny, the anchor only affects viewport positioning.
+                                let markerID = sentenceLineMarkerScrollID(pending)
+                                let safeTop = getSafeAreaTop()
+                                let belowStatusBar = (safeTop + 32) / max(scrollViewHeight, 1)
+                                scrollWithAnimation {
+                                    proxy.scrollTo(markerID, anchor: UnitPoint(x: 0.5, y: belowStatusBar))
+                                }
+                            }
+                        }
+                    }
+                }
+                .onChange(of: karaokeEngine.currentWordIndex) { oldValue, newValue in
+                    // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
+                    // The onChange handler runs during view updates, so we must defer everything
+                    // Capture proxy explicitly for async closure
+                    let capturedProxy = proxy
+                    DispatchQueue.main.async {
+                        // During scrubbing, word highlighting continues following audio
+                        // Scrolling is paused during scrubbing to prevent jarring movement
+                        guard !isScrubbing else { return }
+                        
+                        // CRITICAL FIX: Don't scroll if wordIndex is invalid (-1 or nil)
+                        // This prevents scrolling when there's no valid word
+                        guard let wordIndex = newValue, wordIndex >= 0 else {
+                            return
+                        }
+                        
+                        // #region agent log
+                        agentDebugLog("H3", "OptimizedReaderView.swift:currentWordIndex", "word change", [
+                            "wordIndex": wordIndex,
+                            "currentSentenceIndex": currentSentenceIndex,
+                            "foundSentenceIndex": findSentenceAtTime(getCurrentAudioTime()) ?? -1
+                        ])
+                        // #endregion agent log
+                        
+                        // Trigger haptic feedback when word changes during normal playback
+                        // Avoid haptics while the user is actively dragging the scroll view (reduces scroll hitching)
+                        if !syncGate.isUserDraggingScroll, wordIndex != lastHapticWordIndex {
+                            hapticGenerator?.impactOccurred(intensity: 0.7)
+                            lastHapticWordIndex = wordIndex
+                        }
+                        
+                        // Time-based sentence lookup for scrolling only (highlighting is time/word-driven)
+                        let currentTime = getCurrentAudioTime()
+                        let sentenceIndex = findSentenceAtTime(currentTime)
+                        
+                        guard let sentenceIndex else {
+                            // No sentence found; skip scrolling but keep highlighting active
+                            return
+                        }
+                        
+                        let didAdvanceSentence = sentenceIndex != currentSentenceIndex
+                        if didAdvanceSentence {
+                            currentSentenceIndex = sentenceIndex
+                            lineScrollMarkerOffsetY = 0
+                            cachedLineLayoutSentenceId = nil
+                            cachedLineLayoutRectsByWordIndex = [:]
+                            
+                            if isPlaybackAutoScrollEnabled {
+                                autoScrollOnSentenceAdvance(to: sentenceIndex, proxy: capturedProxy)
+                            }
+                        } else {
+                            if isPlaybackAutoScrollEnabled {
+                                autoScrollLongSentenceIfNeeded(wordIndex: wordIndex, proxy: capturedProxy)
+                            }
+                        }
+                    }
+                }
+                .onChange(of: isScrubbing) { oldValue, newValue in
+                    // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
+                    DispatchQueue.main.async {
+                        if newValue {
+                            // Scrubbing started - update mode and prepare haptic
+                            scrollMode = .scrubbing
+                            hapticGenerator?.prepare()
+                            // Show header during scrubbing
+                            showHeader()
+                        } else {
+                            // Scrubbing ended - resume playing mode and reset haptic tracking
+                            lastHapticWordIndex = nil
+                            scrollMode = .playing
+                            // Schedule hide if still playing
+                            if audioPlayer.isPlaying {
+                                scheduleHeaderHide()
+                            }
+                        }
+                    }
+                }
+                .onChange(of: audioPlayer.currentTime) { oldValue, newValue in
+                    // CRITICAL FIX: Defer state modification to avoid "modifying state during view update" warning
+                    DispatchQueue.main.async {
+                        // Keep slider value in sync with audio player when not scrubbing
+                        // This ensures smooth slider movement during normal playback
+                        if !isScrubbing {
+                            sliderValue = newValue
+                        }
+
+                        // Keep Lock Screen / Control Center in sync.
+                        // Now Playing updates are handled by the audio player internally
+
+                        // Throttled Live Activity progress update (manager handles rate limiting)
+                        ReadingActivityManager.shared.update(
+                            isPlaying: audioPlayer.isPlaying,
+                            currentTime: newValue,
+                            duration: audioPlayer.duration
+                        )
+                    }
+                }
+                .onChange(of: audioPlayer.isPlaying) { oldValue, newValue in
+                    // Update scroll mode when playback state changes
+                    DispatchQueue.main.async {
+                        if newValue {
+                            // Started playing - set mode to playing (unless scrubbing)
+                            if scrollMode != .scrubbing {
+                                scrollMode = .playing
+                            }
+                            // Schedule header auto-hide when playing starts
+                            scheduleHeaderHide()
+                        } else {
+                            // Paused - set mode to paused
+                            if scrollMode != .scrubbing {
+                                scrollMode = .paused
+                            }
+                            // Show and keep header and menu visible when paused
+                            headerHideTask?.cancel()
+                            withAnimation(.easeIn(duration: 0.2)) {
+                                isHeaderVisible = true
+                                isMenuExpanded = true
+                            }
+                        }
+                    }
+                }
+                    } // Close ScrollViewReader
+                      } // Close scrollContent
+
+    
+    private var mainContentLayer: some View {
+        VStack(spacing: 0) {
+            headerView
+                .opacity(isHeaderVisible ? 1 : 0)
+                .frame(height: isHeaderVisible ? nil : 0, alignment: .top)
+                .clipped()
+                .animation(.easeInOut(duration: 0.3), value: isHeaderVisible)
+                .zIndex(100)
+    #if DEBUG
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        showAutoScrollHUD.toggle()
+                    }
+                )
+    #endif
+
+            ReadingContainerView(
+                headerHeight: headerHeight,
+                playbackControlsHeight: playbackControlsHeight,
+                safeMargin: safeMargin,
+                isHeaderVisible: isHeaderVisible
+            ) {
+                scrollContent
+            }
+        }
+    }
+    
+    // MARK: - Main ZStack Content
+    
+    private var mainZStackContent: some View {
         ZStack {
-            readerColors.background
-                .ignoresSafeArea()
-                // Avoid a launch "flash" where we render the default `.light` background for 1 frame,
-                // then immediately switch to the saved value when `loadSettings()` runs in `.onAppear`.
-                .animation(didLoadSettings ? .easeInOut(duration: 0.4) : nil, value: readerBackgroundColor) // Smooth fade transition after initial load
+            backgroundLayer
             
-            // Tap outside to close dropdown
+            // Tap outside to close dropdown - blocks ALL touches from reaching reader
             if isChapterDropdownOpen {
-                Color.clear
+                Color.black.opacity(0.001) // Invisible but hittable - Color.clear doesn't intercept touches
+                    .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             isChapterDropdownOpen = false
                         }
                     }
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
+                    .zIndex(150) // Above reader content but below dropdown (which is zIndex 200)
+                
             }
             
-            VStack(spacing: 0) {
-                // Header - fades and collapses when hidden
-                headerView
-                    .opacity(isHeaderVisible ? 1 : 0)
-                    .frame(height: isHeaderVisible ? nil : 0, alignment: .top)
-                    .clipped()
-                    .animation(.easeInOut(duration: 0.3), value: isHeaderVisible)
-                    .zIndex(100) // Ensure header is above content
-                    #if DEBUG
-                    .simultaneousGesture(
-                        TapGesture(count: 2).onEnded {
-                            showAutoScrollHUD.toggle()
-                        }
-                    )
-                    #endif
-                
-                // Text Display with Simplified Container
-                ReadingContainerView(
-                    headerHeight: headerHeight,
-                    playbackControlsHeight: playbackControlsHeight,
-                    safeMargin: safeMargin,
-                    isHeaderVisible: isHeaderVisible
-                ) {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 20) {
-                                ForEach(Array(preloadedData.sentences.enumerated()), id: \.element.id) { index, sentence in
-                                    OptimizedSentenceView(
-                                        sentence: sentence,
-                                        sentenceIndex: index,
-                                        isBookmarked: chapterBookmarksBySentenceIndex[index] != nil,
-                                        currentSentenceIndex: currentSentenceIndex,
-                                        scrollIDSuffix: readerBackgroundColor.rawValue,
-                                        lineMarkerID: sentenceLineMarkerScrollID(index),
-                                        lineMarkerOffsetY: lineScrollMarkerOffsetY,
-                                        currentWordIndex: karaokeEngine.currentWordIndex,
-                                        lastSpokenWordIndex: karaokeEngine.lastSpokenWordIndex,
-                                        themeColors: readerColors,
-                                        textSize: textSize.fontSize,
-                                        highlightColor: highlightColor,
-                                        indexedWords: preloadedData.indexedWords,
-                                        explainableWordIndices: explainableWordIndices,
-                                        searchMatches: searchMatches.filter { $0.sentenceIndex == index }.map { $0.range },
-                                        currentSearchMatchIndex: {
-                                            // Check if the current global search match is in this sentence
-                                            guard currentSearchMatchIndex < searchMatches.count,
-                                                  searchMatches[currentSearchMatchIndex].sentenceIndex == index else {
-                                                return nil
-                                            }
-                                            // Find which position this match is within this sentence's matches
-                                            let matchesInThisSentence = searchMatches.enumerated().filter { $0.element.sentenceIndex == index }
-                                            return matchesInThisSentence.firstIndex(where: { $0.offset == currentSearchMatchIndex })
-                                        }(),
-                                    containerWidth: scrollViewWidth - 40, // Account for horizontal padding
-                                    onSentenceTap: {
-                                        // Reset timer if header visible, but don't reopen if hidden
-                                        handleUserInteraction(shouldReopen: false)
-                                        
-                                        // Tap-to-seek: jump to sentence's start time
-                                        let seekTime = sentence.startTime
-                                        let tappedIndex = index
-                                            
-                                            Task { @MainActor in
-                                                // Use seekAndWait to ensure audio has actually moved before updating UI.
-                                                // This prevents race conditions during playback.
-                                                let actualTime = await audioPlayer.seekAndWait(to: seekTime)
-                                                
-                                                karaokeEngine.resetSearchState()
-                                                karaokeEngine.updateTime(actualTime, duration: audioPlayer.duration)
-                                                
-                                                // Directly set the sentence index (we know which one was tapped)
-                                                currentSentenceIndex = tappedIndex
-                                                isOutOfSync = false
-                                                
-                                                hapticGenerator?.impactOccurred(intensity: 0.5)
-                                                
-                                                // Scroll to bring the tapped sentence into view using our smart positioning
-                                                jumpToSyncPosition(time: actualTime)
-                                            }
-                                        },
-                                        onExplainableWordTap: { wordIndex in
-                                            // Show explanation overlay for the tapped explainable word
-                                            if let term = ExplainableTermsService.shared.getTerm(at: wordIndex, chapterId: preloadedData.chapter.id) {
-                                                selectedExplainableTerm = term
-                                                showExplanationOverlay = true
-                                                hapticGenerator?.impactOccurred(intensity: 0.3)
-                                            }
-                                        }
-                                    )
-                                    .equatable() // Use Equatable to prevent unnecessary re-renders
-                                    .id("\(index)-\(readerBackgroundColor.rawValue)") // Include background color in id to force rebuild on color change
-                                    .background(
-                                        // CRITICAL FIX: Always measure, but only write preference for current sentence
-                                        // This prevents GeometryReader from appearing/disappearing during layout (which causes warnings)
-                                        GeometryReader { geometry in
-                                            Color.clear
-                                                .preference(
-                                                    key: SentencePositionPreferenceKey.self,
-                                                    value: index == currentSentenceIndex 
-                                                        ? geometry.frame(in: .named("scroll"))
-                                                        : .zero  // Only write non-zero for current sentence (handler ignores .zero)
-                                                )
-                                        }
-                                    )
-                                }
-                            }
-                            .padding(.horizontal, 20)
-                            .padding(.top, scrollContentVerticalPadding + (isMenuExpanded ? 0 : 50))
-                            .padding(.bottom, playbackControlsHeight + 24) // Extra bottom padding so content can scroll under controls
-                        }
-                        // IMPORTANT: Measure the actual visible ScrollView viewport (not content geometry).
-                        .background(
-                            GeometryReader { viewportGeo in
-                                Color.clear
-                                    .onAppear {
-                                        scrollViewHeight = viewportGeo.size.height
-                                        scrollViewWidth = viewportGeo.size.width
-                                    }
-                                    .onChange(of: viewportGeo.size.height) { _, h in
-                                        scrollViewHeight = h
-                                    }
-                                    .onChange(of: viewportGeo.size.width) { _, w in
-                                        scrollViewWidth = w
-                                    }
-                            }
-                        )
-                        .coordinateSpace(name: "scroll")
-                        .scrollIndicators(.hidden)
-                        // Tap to show header
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            handleUserInteraction()
-                        }
-                        // Detect user-driven scroll to mark out-of-sync
-                        .simultaneousGesture(
-                            // Avoid marking out-of-sync on incidental taps; require a real drag.
-                            DragGesture(minimumDistance: 10)
-                                .updating($isUserDraggingScroll) { _, state, _ in
-                                    state = true
-                                }
-                                .onChanged { _ in
-                                    // Only mark out-of-sync when user scrolls (not scrubbing)
-                                    guard !isScrubbing else { return }
-                                    isOutOfSync = true
-                                }
-                        )
-                        .overlay(
-                            // Track scroll offset for proper coordinate calculations
-                            GeometryReader { scrollOffsetGeometry in
-                                Color.clear
-                                    .preference(
-                                        key: ScrollOffsetPreferenceKey.self,
-                                        value: scrollOffsetGeometry.frame(in: .named("scroll")).minY
-                                    )
-                            }
-                            .frame(height: 0)
-                        )
-                        .onAppear {
-                            // Initialize scroll mode
-                            scrollMode = audioPlayer.isPlaying ? .playing : .paused
-                            
-                            // Store proxy reference for use outside ScrollViewReader scope
-                            scrollProxy = proxy
-                            
-                            // If we need to scroll to current position
-                            if shouldScrollToCurrentOnAppear {
-                                shouldScrollToCurrentOnAppear = false
-                                
-                                // Scroll to current sentence after a brief delay to let layout settle
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                    // Try to get sentence from karaoke engine first (already playing case)
-                                    if let wordIndex = karaokeEngine.currentWordIndex,
-                                       let sentenceIndex = wordToSentenceMap[wordIndex] {
-                                        currentSentenceIndex = sentenceIndex
-                                        proxy.scrollTo(sentenceScrollID(sentenceIndex), anchor: .center)
-                                        print("⚡ Scrolled to sentence \(sentenceIndex) for word \(wordIndex)")
-                                    }
-                                    // Otherwise use currentSentenceIndex if it was set (fresh load with seek)
-                                    else if currentSentenceIndex > 0 {
-                                        proxy.scrollTo(sentenceScrollID(currentSentenceIndex), anchor: .center)
-                                        print("⚡ Scrolled to pre-set sentence \(currentSentenceIndex)")
-                                    }
-                                    // Or check if we have initialSeekTime and find the sentence
-                                    else if let seekTime = initialSeekTime, seekTime > 0,
-                                            let sentenceIndex = findSentenceAtTime(seekTime) {
-                                        currentSentenceIndex = sentenceIndex
-                                        proxy.scrollTo(sentenceScrollID(sentenceIndex), anchor: .center)
-                                        print("⚡ Scrolled to sentence \(sentenceIndex) for initialSeekTime \(seekTime)")
-                                    }
-                                }
-                            }
-                        }
-                        .onPreferenceChange(SentencePositionPreferenceKey.self) { frame in
-                        // Only update frame if it's valid and for the current sentence
-                        // This prevents false updates from other sentences
-                        guard frame != .zero else { return }
-                        DispatchQueue.main.async {
-                            currentSentenceFrame = frame
-                            // #region agent log
-                            agentDebugLog("H1", "OptimizedReaderView.swift:SentencePositionPreference", "updated currentSentenceFrame", [
-                                "frameMinY": frame.minY,
-                                "frameHeight": frame.height,
-                                "currentSentenceIndex": currentSentenceIndex
-                            ])
-                            // #endregion agent log
-                            
-                            // SINGLE-SOURCE centering decision: center only if measured height fits band.
-                            // Note: Long sentences with word targets are now handled directly in jumpToSyncPosition
-                            // to avoid double-jump. This handler only deals with short sentence centering.
-                            if let pending = pendingCenterSentenceIndex, pending == currentSentenceIndex {
-                                defer {
-                                    pendingCenterSentenceIndex = nil
-                                    pendingResyncWordIndex = nil
-                                }
-                                
-                                guard let proxy = scrollProxy else { return }
-                                
-                                let sentenceID = sentenceScrollID(pending)
-                                
-                                if frame.height <= fieldOfViewHeight {
-                                    // Short sentence: smooth center animation.
-                                    scrollWithAnimation {
-                                        proxy.scrollTo(sentenceID, anchor: .center)
-                                    }
-                                }
-                                // Long sentences are handled directly in jumpToSyncPosition - no second jump needed.
-                            }
-                        }
-                    }
-                    .onChange(of: karaokeEngine.currentWordIndex) { oldValue, newValue in
-                        // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
-                        // The onChange handler runs during view updates, so we must defer everything
-                        // Capture proxy explicitly for async closure
-                        let capturedProxy = proxy
-                        DispatchQueue.main.async {
-                            // During scrubbing, word highlighting continues following audio
-                            // Scrolling is paused during scrubbing to prevent jarring movement
-                            guard !isScrubbing else { return }
-                            
-                            // CRITICAL FIX: Don't scroll if wordIndex is invalid (-1 or nil)
-                            // This prevents scrolling when there's no valid word
-                            guard let wordIndex = newValue, wordIndex >= 0 else {
-                                return
-                            }
-                            
-                            // #region agent log
-                            agentDebugLog("H3", "OptimizedReaderView.swift:currentWordIndex", "word change", [
-                                "wordIndex": wordIndex,
-                                "currentSentenceIndex": currentSentenceIndex,
-                                "foundSentenceIndex": findSentenceAtTime(getCurrentAudioTime()) ?? -1
-                            ])
-                            // #endregion agent log
-                            
-                            // Trigger haptic feedback when word changes during normal playback
-                            // Avoid haptics while the user is actively dragging the scroll view (reduces scroll hitching)
-                            if !syncGate.isUserDraggingScroll, wordIndex != lastHapticWordIndex {
-                                hapticGenerator?.impactOccurred(intensity: 0.7)
-                                lastHapticWordIndex = wordIndex
-                            }
-                            
-                            // Time-based sentence lookup for scrolling only (highlighting is time/word-driven)
-                            let currentTime = getCurrentAudioTime()
-                            let sentenceIndex = findSentenceAtTime(currentTime)
-                            
-                            guard let sentenceIndex else {
-                                // No sentence found; skip scrolling but keep highlighting active
-                                return
-                            }
-                            
-                            let didAdvanceSentence = sentenceIndex != currentSentenceIndex
-                            if didAdvanceSentence {
-                                currentSentenceIndex = sentenceIndex
-                                lineScrollMarkerOffsetY = 0
-                                cachedLineLayoutSentenceId = nil
-                                cachedLineLayoutRectsByWordIndex = [:]
-                                
-                                if isPlaybackAutoScrollEnabled {
-                                    autoScrollOnSentenceAdvance(to: sentenceIndex, proxy: capturedProxy)
-                                }
-                            } else {
-                                if isPlaybackAutoScrollEnabled {
-                                    autoScrollLongSentenceIfNeeded(wordIndex: wordIndex, proxy: capturedProxy)
-                                }
-                            }
-                        }
-                    }
-                    .onChange(of: isScrubbing) { oldValue, newValue in
-                        // CRITICAL FIX: Use DispatchQueue.main.async for stronger deferral - guarantees next runloop tick
-                        DispatchQueue.main.async {
-                            if newValue {
-                                // Scrubbing started - update mode and prepare haptic
-                                scrollMode = .scrubbing
-                                hapticGenerator?.prepare()
-                                // Show header during scrubbing
-                                showHeader()
-                            } else {
-                                // Scrubbing ended - resume playing mode and reset haptic tracking
-                                lastHapticWordIndex = nil
-                                scrollMode = .playing
-                                // Schedule hide if still playing
-                                if audioPlayer.isPlaying {
-                                    scheduleHeaderHide()
-                                }
-                            }
-                        }
-                    }
-                    .onChange(of: audioPlayer.currentTime) { oldValue, newValue in
-                        // CRITICAL FIX: Defer state modification to avoid "modifying state during view update" warning
-                        DispatchQueue.main.async {
-                            // Keep slider value in sync with audio player when not scrubbing
-                            // This ensures smooth slider movement during normal playback
-                            if !isScrubbing {
-                                sliderValue = newValue
-                            }
-
-                            // Keep Lock Screen / Control Center in sync.
-                            // Now Playing updates are handled by the audio player internally
-                        }
-                    }
-                    .onChange(of: audioPlayer.isPlaying) { oldValue, newValue in
-                        // Update scroll mode when playback state changes
-                        DispatchQueue.main.async {
-                            if newValue {
-                                // Started playing - set mode to playing (unless scrubbing)
-                                if scrollMode != .scrubbing {
-                                    scrollMode = .playing
-                                }
-                                // Schedule header auto-hide when playing starts
-                                scheduleHeaderHide()
-                            } else {
-                                // Paused - set mode to paused
-                                if scrollMode != .scrubbing {
-                                    scrollMode = .paused
-                                }
-                                // Show and keep header and menu visible when paused
-                                headerHideTask?.cancel()
-                                withAnimation(.easeIn(duration: 0.2)) {
-                                    isHeaderVisible = true
-                                    isMenuExpanded = true
-                                }
-                            }
-                        }
-                    }
-                } // Close ScrollViewReader
-                } // Close ReadingContainerView content
-            } // Close VStack
+            mainContentLayer
             
             // Playback Controls - stays in place, gets covered by keyboard when search is active
             VStack {
@@ -831,14 +981,16 @@ struct OptimizedReaderView: View {
             
             // Search Bar Overlay - stays above keyboard when typing
             if isSearchActive {
-                VStack(spacing: 0) {
+                VStack {
                     Spacer()
                     searchBarView
+                        .padding(.bottom, keyboardHeight)
                 }
+                .ignoresSafeArea(.keyboard)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .zIndex(999)
             }
-
+            
             // Center toast confirmation (non-blocking overlay)
             if let toast = bookmarkToast {
                 VStack(spacing: 10) {
@@ -886,8 +1038,55 @@ struct OptimizedReaderView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.95)))
                 .zIndex(1001)
             }
+          
+            // Inline Note Editor Overlay
+            if isNoteEditorPresented {
+                // Dim backdrop — tap it to dismiss without saving
+                Color.black.opacity(isLightBackground ? 0.18 : 0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        isNoteFieldFocused = false
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            isNoteEditorPresented = false
+                        }
+                    }
+                    .zIndex(1002)
+                noteEditorOverlay
+                    .zIndex(1003)
+            }
+
+            // Sentence Share Overlay
+            if isShareOverlayPresented, let shareText = selectedShareText {
+                SentenceShareOverlayView(
+                    text: shareText,
+                    bookTitle: preloadedData.book.title,
+                    bookAuthor: preloadedData.book.author,
+                    chapterTitle: preloadedData.chapter.title,
+                    coverURLString: preloadedData.book.coverUrl,
+                    currentReaderBackground: readerBackgroundColor,
+                    readerColors: readerColors,
+                    readerFont: readerFont,
+                    onDismiss: {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            isShareOverlayPresented = false
+                            selectedShareText = nil
+                        }
+                        if pendingChapterAdvance {
+                            pendingChapterAdvance = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                goToNextChapter(cancelBackgroundLoad: false)
+                            }
+                        }
+                    },
+                    preloadedCoverImage: preloadedData.coverImage,
+                    preloadedDominantColor: preloadedData.coverDominantColor,
+                    usesReaderDominantColor: usesDominantColorBackground
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                .zIndex(1002)
+            }
             
-            #if DEBUG
+#if DEBUG
             if showAutoScrollHUD {
                 VStack {
                     autoScrollDebugOverlay
@@ -895,7 +1094,7 @@ struct OptimizedReaderView: View {
                 }
                 .zIndex(9999)
             }
-            #endif
+#endif
             
             // Chapter dropdown menu - positioned at body level to avoid clipping
             if isChapterDropdownOpen && hasChapters {
@@ -917,16 +1116,30 @@ struct OptimizedReaderView: View {
                 .zIndex(200) // Above header but below tap-outside overlay
             }
         }
-        .onAppear {
-            // Load saved settings from UserDefaults WITHOUT animating the initial state change
-            // (prevents a brief white flash behind the menu on first render).
-            var tx = Transaction()
-            tx.disablesAnimations = true
-            withTransaction(tx) {
-                loadSettings()
-            }
-            didLoadSettings = true
+    }
+    
+    // MARK: - Body
+    // Split into two helper properties to avoid Swift type-checker timeout on long modifier chains.
 
+    var body: some View {
+        readerContentLifecycle
+    }
+
+    // First half: appearance + settings persistence modifiers
+    private var readerContentSettings: some View {
+        mainZStackContent
+            .onAppear {
+                    // Load saved settings from UserDefaults WITHOUT animating the initial state change
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) {
+                        loadSettings()
+                    }
+                    didLoadSettings = true
+                    
+            // Use preloaded values — instant, no network wait
+                        coverDominantColor = preloadedData.coverDominantColor
+            
             // Prime bookmark cache for this chapter (powers markers/ticks + fast lookup)
             Task { @MainActor in
                 rebuildChapterBookmarkCache()
@@ -950,7 +1163,7 @@ struct OptimizedReaderView: View {
                     explainableWordIndices = indices
                 }
             }
-
+            
             // Prepare background audio session + interruption handling (activation happens on play).
             AudioSessionController.shared.configureIfNeeded()
             var shouldResumeAfterInterruption = false
@@ -1036,98 +1249,134 @@ struct OptimizedReaderView: View {
             
             // Setup audio - either skip if already playing, or load fresh
             setupAudioOnAppear()
+
+            // Start / resume Live Activity for Dynamic Island
+            ReadingActivityManager.shared.startOrUpdate(
+                bookTitle: preloadedData.book.title,
+                bookId: preloadedData.book.id,
+                coverImage: preloadedData.coverImage,
+                chapterTitle: preloadedData.chapter.title,
+                chapterNumber: preloadedData.chapter.order + 1,
+                isPlaying: audioPlayer.isPlaying,
+                currentTime: audioPlayer.currentTime,
+                duration: audioPlayer.duration
+            )
+
+            // Track keyboard height for search bar positioning
+            NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main) { notification in
+                if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        keyboardHeight = frame.height
+                    }
+                }
+            }
+            NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { _ in
+                withAnimation(.easeOut(duration: 0.25)) {
+                    keyboardHeight = 0
+                }
+            }
         }
-        .onChange(of: playbackSpeed) { oldValue, newValue in
-            // Update audio player speed when setting changes
+        .onChange(of: playbackSpeed) { _, newValue in
             audioPlayer.setPlaybackSpeed(newValue)
-            // Save to UserDefaults
             UserDefaults.standard.set(newValue, forKey: playbackSpeedKey)
         }
-        .onChange(of: textSize) { oldValue, newValue in
-            // Save to UserDefaults
+        .onChange(of: textSize) { _, newValue in
             UserDefaults.standard.set(newValue.rawValue, forKey: textSizeKey)
         }
-        .onChange(of: highlightColor) { oldValue, newValue in
-            // Save to UserDefaults
+        .onChange(of: readerFont) { _, newValue in
+            UserDefaults.standard.set(newValue.rawValue, forKey: readerFontKey)
+        }
+        .onChange(of: highlightColor) { _, newValue in
             UserDefaults.standard.set(newValue.rawValue, forKey: highlightColorKey)
         }
-        .onChange(of: readerBackgroundColor) { oldValue, newValue in
-            // Save to UserDefaults
+        .onChange(of: readerBackgroundColor) { _, newValue in
             UserDefaults.standard.set(newValue.rawValue, forKey: readerBackgroundColorKey)
+            UserDefaults.standard.set(false, forKey: "readerUsesDominantColor")
         }
-        // Note: long/short classification is now derived only from `currentSentenceFrame.height > fieldOfViewHeight`.
+        .onChange(of: usesDominantColorBackground) { _, newValue in
+            UserDefaults.standard.set(newValue, forKey: "readerUsesDominantColor")
+        }
         .onPreferenceChange(HeaderHeightPreferenceKey.self) { value in
-            DispatchQueue.main.async {
-                headerHeight = value
-            }
+            DispatchQueue.main.async { headerHeight = value }
         }
         .onPreferenceChange(PlaybackControlsHeightPreferenceKey.self) { value in
-            DispatchQueue.main.async {
-                playbackControlsHeight = value
-            }
+            DispatchQueue.main.async { playbackControlsHeight = value }
         }
         .onChange(of: isUserDraggingScroll) { _, newValue in
-            // Mirror transient GestureState into an object the display-link throttle can read.
             syncGate.isUserDraggingScroll = newValue
         }
+    }
+
+    // Second half: lifecycle / playback / navigation modifiers
+    private var readerContentLifecycle: some View {
+        readerContentSettings
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .active:
-                // When returning from background, CADisplayLink may have paused.
-                // Re-sync word highlighting (and scroll if still in auto-sync mode).
                 DispatchQueue.main.async {
                     let t = getCurrentAudioTime()
                     karaokeEngine.resetSearchState()
                     karaokeEngine.updateTime(t, duration: audioPlayer.duration)
-
                     if let sentenceIndex = findSentenceAtTime(t) {
                         currentSentenceIndex = sentenceIndex
                     }
-
                     if !isOutOfSync && !isScrubbing {
                         jumpToSyncPosition(time: t)
                     }
-                    
-                    // Schedule header auto-hide if playing
                     if audioPlayer.isPlaying {
                         scheduleHeaderHide()
                     }
                 }
-                // Resume listening time tracking if playing
                 if audioPlayer.isPlaying {
                     lastPlayingStateTime = Date()
                 }
             case .inactive, .background:
-                // Save progress when app goes to background
                 saveReadingProgress()
-                // Force sync to cloud immediately
                 readingProgressService.forceSyncToCloud()
-                // Log accumulated listening time
                 logSessionListeningTime()
                 ReadingStatsService.shared.forceSyncToCloud()
             @unknown default:
                 break
             }
         }
+        .onChange(of: audioPlayer.didReachEnd) { _, didEnd in
+            guard didEnd else { return }
+            guard hasNextChapter else { return }
+            audioPlayer.didReachEnd = false
+            readingProgressService.markChapterComplete(
+                bookId: preloadedData.book.id,
+                chapterId: preloadedData.chapter.id
+            )
+            ReadingStatsService.shared.logChapterComplete(bookId: preloadedData.book.id)
+            router.shouldAutoPlayOnLoad = true
+            if isShareOverlayPresented {
+                pendingChapterAdvance = true
+            } else {
+                goToNextChapter(cancelBackgroundLoad: false)
+            }
+        }
         .onChange(of: audioPlayer.isPlaying) { _, isPlaying in
             if isPlaying {
-                // Started playing - record the time
                 lastPlayingStateTime = Date()
             } else {
-                // Stopped playing - accumulate listening time
                 if let lastTime = lastPlayingStateTime {
                     let elapsed = Date().timeIntervalSince(lastTime)
-                    if elapsed > 0 && elapsed < 3600 { // Sanity check: max 1 hour per segment
+                    if elapsed > 0 && elapsed < 3600 {
                         sessionListeningSeconds += elapsed
                     }
                 }
                 lastPlayingStateTime = nil
+                saveReadingProgress()
             }
+            // Keep Live Activity in sync with play/pause
+            ReadingActivityManager.shared.update(
+                isPlaying: isPlaying,
+                currentTime: audioPlayer.currentTime,
+                duration: audioPlayer.duration
+            )
         }
         .onReceive(bookmarkService.$bookmarks) { _ in
-            Task { @MainActor in
-                rebuildChapterBookmarkCache()
-            }
+            Task { @MainActor in rebuildChapterBookmarkCache() }
         }
         .sheet(isPresented: $isBookmarkEditorPresented) {
             BookmarkEditSheet(bookmarkId: bookmarkEditorId)
@@ -1135,26 +1384,17 @@ struct OptimizedReaderView: View {
                 .environmentObject(bookmarkService)
         }
         .onDisappear {
-            // Save reading progress on view disappear
             saveReadingProgress()
-            
-            // Log accumulated listening time for stats
+            cancelSleepTimer()
             logSessionListeningTime()
-            
-            // Clean up CADisplayLink
             displayLink?.invalidate()
             displayLink = nil
-            
-            // Cancel pending toast dismiss work
             bookmarkToastTask?.cancel()
             bookmarkToastTask = nil
-            
-            // Cancel header hide task
             headerHideTask?.cancel()
             headerHideTask = nil
-            
-            // Clean up timers
             karaokeEngine.reset()
+            ReadingActivityManager.shared.end()
         }
     }
     
@@ -1174,7 +1414,7 @@ struct OptimizedReaderView: View {
                 } else {
                     // Standard mode: Navigate to tabs and dismiss
                     router.navigateBackToTabs()
-                dismiss()
+                    dismiss()
                 }
             }) {
                 // Use chevron.down in overlay mode for Spotify-style collapse hint
@@ -1271,8 +1511,12 @@ struct OptimizedReaderView: View {
     }
     
     // Helper to get top safe area inset
-    private func getSafeAreaTop() -> CGFloat {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+    private var screenHeight: CGFloat {
+            UIScreen.main.bounds.height
+        }
+        
+        private func getSafeAreaTop() -> CGFloat {
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = windowScene.windows.first else {
             return 44 // Default fallback
         }
@@ -1291,77 +1535,42 @@ struct OptimizedReaderView: View {
     // MARK: - Chapter Navigation
     private func goToPreviousChapter() {
         guard hasPreviousChapter else { return }
-        // Save progress before changing chapters
         saveReadingProgress()
-        // Just pause - the new chapter will load fresh audio
+        bookmarkJumpReturnTime = nil
+        BackgroundChapterLoader.shared.cancelCurrentLoad()
         audioPlayer.pause()
         let prevChapterOrder = preloadedData.book.chapters.sorted { $0.order < $1.order }[currentChapterIndex - 1].order
-        
-        if isOverlayMode {
-            // In overlay mode: collapse first, then navigate
-            onDismiss?()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                router.navigate(to: .reader(bookId: preloadedData.book.id, chapterNumber: prevChapterOrder + 1))
-            }
-        } else {
-            // Standard mode: Navigate immediately to prevent showing "ready page"
-        router.replace(with: .reader(bookId: preloadedData.book.id, chapterNumber: prevChapterOrder + 1))
-        dismiss()
-        }
+        if isOverlayMode { onDismiss?() }
+        router.navigate(to: .reader(bookId: preloadedData.book.id, chapterNumber: prevChapterOrder + 1))
     }
     
-    private func goToNextChapter() {
+    private func goToNextChapter(cancelBackgroundLoad: Bool = true) {
         guard hasNextChapter else { return }
-        // Save progress and mark current chapter as complete
         saveReadingProgress()
+        bookmarkJumpReturnTime = nil
         readingProgressService.markChapterComplete(bookId: preloadedData.book.id, chapterId: preloadedData.chapter.id)
-        // Log chapter completion for stats
         ReadingStatsService.shared.logChapterComplete(bookId: preloadedData.book.id)
-        // Just pause - the new chapter will load fresh audio
+        if cancelBackgroundLoad {
+            BackgroundChapterLoader.shared.cancelCurrentLoad()
+        }
         audioPlayer.pause()
         let nextChapterOrder = preloadedData.book.chapters.sorted { $0.order < $1.order }[currentChapterIndex + 1].order
-        
-        if isOverlayMode {
-            // In overlay mode: collapse first, then navigate
-            onDismiss?()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                router.navigate(to: .reader(bookId: preloadedData.book.id, chapterNumber: nextChapterOrder + 1))
-            }
-        } else {
-            // Standard mode: Navigate immediately to prevent showing "ready page"
-        router.replace(with: .reader(bookId: preloadedData.book.id, chapterNumber: nextChapterOrder + 1))
-        dismiss()
-        }
+        if isOverlayMode { onDismiss?() }
+        router.navigate(to: .reader(bookId: preloadedData.book.id, chapterNumber: nextChapterOrder + 1))
     }
     
     private func goToChapter(_ chapterOrder: Int) {
-        // Save progress before changing chapters
         saveReadingProgress()
-        // Mark current chapter as complete if we're near the end
         if audioPlayer.currentTime > audioPlayer.duration * 0.95 {
             readingProgressService.markChapterComplete(bookId: preloadedData.book.id, chapterId: preloadedData.chapter.id)
-            // Log chapter completion for stats
             ReadingStatsService.shared.logChapterComplete(bookId: preloadedData.book.id)
         }
-        // Just pause - the new chapter will load fresh audio
+        BackgroundChapterLoader.shared.cancelCurrentLoad()
         audioPlayer.pause()
-        // Close dropdown
         isChapterDropdownOpen = false
-        
-        if isOverlayMode {
-            // In overlay mode: collapse first, then navigate
-            onDismiss?()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                router.navigate(to: .reader(bookId: preloadedData.book.id, chapterNumber: chapterOrder + 1))
-            }
-        } else {
-            // Standard mode: Navigate immediately to prevent showing "ready page"
-        // This ensures ReaderLoadingView appears right away, no intermediate view flash
-        router.replace(with: .reader(bookId: preloadedData.book.id, chapterNumber: chapterOrder + 1))
-        dismiss()
-        }
+        if isOverlayMode { onDismiss?() }
+        router.navigate(to: .reader(bookId: preloadedData.book.id, chapterNumber: chapterOrder + 1))
     }
-    
     // MARK: - Reading Stats
     private func logSessionListeningTime() {
         // If still playing, accumulate time since last check
@@ -1430,7 +1639,7 @@ struct OptimizedReaderView: View {
     private var chapterDropdownMenu: some View {
         let sortedChapters = preloadedData.book.chapters.sorted { $0.order < $1.order }
         
-        return VStack(spacing: 0) {
+        return VStack(spacing: 6) {
             ForEach(Array(sortedChapters.enumerated()), id: \.element.id) { index, chapter in
                 let isCurrentChapter = chapter.id == preloadedData.chapter.id
                 
@@ -1440,135 +1649,87 @@ struct OptimizedReaderView: View {
                     HStack {
                         Text(chapter.title)
                             .font(.system(size: 14, weight: isCurrentChapter ? .semibold : .regular))
-                            .foregroundColor(isCurrentChapter ? readerColors.primaryText : readerColors.text)
+                            .foregroundColor(isCurrentChapter ? readerColors.primary : readerColors.text)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
                         
                         Spacer()
                         
-                        if isCurrentChapter {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(readerColors.primaryText)
-                        }
+                        let progress = readingProgressService.getProgress(for: preloadedData.book.id)
+                        let chapterProgress = progress?.chapterProgressById[chapter.id]
+                        let percent = Int((chapterProgress?.fractionComplete ?? 0) * 100)
+                        
+                        Text("\(percent)%")
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundColor(isCurrentChapter ? readerColors.primary : readerColors.textSecondary)
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(isCurrentChapter ? readerColors.primary : Color.clear)
+                    .modifier(ChapterRowGlassModifier(isSelected: isCurrentChapter))
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(PlainButtonStyle())
-                
-                if index < sortedChapters.count - 1 {
-                    Divider()
-                        .background(readerColors.cardBorder)
-                }
             }
         }
+        .padding(6)
         .background {
             if #available(iOS 26.0, *) {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(.ultraThinMaterial)
+                Color.clear
             } else {
                 readerColors.card
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
         }
-        .cornerRadius(12)
+        .cornerRadius(16)
         .overlay {
             if #available(iOS 26.0, *) {
                 EmptyView()
             } else {
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 16)
                     .strokeBorder(readerColors.cardBorder, lineWidth: 1)
             }
         }
-        .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6) // Darker shadow for better visibility
-        .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2) // Additional shadow layer
-        .frame(width: 280) // Fixed width for consistent appearance
+        .modifier(GlassEffectModifier(isLight: isLightBackground))
+        .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
+        .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
+        .frame(width: 280)
         .onTapGesture {
-            // Prevent tap from propagating to background (which would close dropdown)
-            // This allows tapping inside dropdown without closing it
+            // Prevent tap from propagating to background
         }
     }
     
     // MARK: - Playback Controls
     private var playbackControls: some View {
-        VStack(spacing: 0) {
-            if isMenuExpanded {
-                VStack(spacing: 16) {
-                    // Collapse button at top center (no circle background, just arrow)
-                    // Positioned evenly between top of menu and progress bar
-                    HStack {
-                        Spacer()
-                        Button(action: {
-                            hideHeaderAndMenu()
-                        }) {
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(readerColors.text)
-                        }
-                        Spacer()
-                    }
-                    .padding(.bottom, 8) // Even spacing above and below (matches spacing: 16 in VStack)
-                    .contentShape(Rectangle()) // Make entire area swipeable
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 30)
-                            .onEnded { value in
-                                // Swipe down to collapse menu and header (only in chevron area)
-                                if value.translation.height > 60 {
-                                    hideHeaderAndMenu()
-                                }
-                            }
-                    )
-                    
-                    // Progress Slider
-                    VStack(spacing: 30) { // Increased spacing so time labels don't touch slider thumb
-                        // Custom slider with darker unplayed portion on light modes
+        VStack(spacing: 16) {
+            if isMenuExpanded {                    // MARK: Floating Glass Playback Card
+                VStack(spacing: 0) {
+                    // Progress Bar
+                    VStack(spacing: 8) {
                         GeometryReader { geometry in
                             ZStack(alignment: .leading) {
-                                // Unplayed portion background - darker on light modes
                                 Rectangle()
-                                    .fill(isLightBackground ? Color.black.opacity(0.5) : Color.white.opacity(0.2))
+                                    .fill(isLightBackground ? Color.black.opacity(0.15) : Color.white.opacity(0.2))
                                     .frame(height: 4)
                                     .cornerRadius(2)
                                 
-                                // Played portion
                                 Rectangle()
                                     .fill(readerColors.primary)
                                     .frame(width: geometry.size.width * CGFloat(audioPlayer.currentTime / max(audioPlayer.duration, 1)), height: 4)
                                     .cornerRadius(2)
                                 
-                                // Slider control overlay (thumb will be visible)
                                 Slider(
                                     value: Binding(
-                                        get: { 
-                                            // When scrubbing, use sliderValue to prevent fighting with audio player
-                                            // When not scrubbing, use audioPlayer.currentTime to show actual progress
-                                            isScrubbing ? sliderValue : audioPlayer.currentTime
-                                        },
+                                        get: { isScrubbing ? sliderValue : audioPlayer.currentTime },
                                         set: { newTime in
-                                            // DEFERRED UPDATES: Silently prepare state during scrubbing, update UI when scrubber lands
-                                            // Note: The set closure is ONLY called when user manually drags the slider
                                             guard newTime.isFinite && newTime >= 0 else { return }
                                             let duration = audioPlayer.duration
                                             let clampedTime = min(max(0, newTime), max(duration, 0))
-                                            
-                                            // CRITICAL FIX: Defer ALL state modifications to avoid "modifying state during view update" warning
                                             Task { @MainActor in
-                                                // If set is called, user is dragging (scrubbing)
-                                                // Update slider value (prevents fighting with audio player during playback)
                                                 sliderValue = clampedTime
                                                 pendingSeekTime = clampedTime
-                                                
-                                                // DO NOT update karaokeEngine during scrubbing
-                                                // Let CADisplayLink continue updating based on actual audio playback
-                                                // Word highlighting will continue following playback, not scrubber position
-                                                
-                                                // Ensure scrubbing state is set (handles edge case where first drag happens before onEditingChanged)
                                                 if !isScrubbing {
                                                     isScrubbing = true
-                                                    // Keep CADisplayLink running so word highlighting continues following audio playback
-                                                    // Only scrolling is paused, not word highlighting
                                                     hapticGenerator?.prepare()
                                                 }
                                             }
@@ -1578,37 +1739,19 @@ struct OptimizedReaderView: View {
                                     onEditingChanged: { isEditing in
                                         Task { @MainActor in
                                             if isEditing {
-                                                // User started scrubbing
                                                 isScrubbing = true
-                                                // Initialize slider value to current audio time (prevents jump when starting to scrub)
                                                 sliderValue = audioPlayer.currentTime
-                                                // Keep CADisplayLink running so word highlighting continues following audio
-                                                // Scrolling will be paused, but word highlighting continues
-                                                // Prepare haptic generator for smooth feedback
                                                 hapticGenerator?.prepare()
                                             } else {
-                                                // User finished scrubbing - perform expensive operations now
-                                                // Note: karaokeEngine state is already prepared from silent updates during scrubbing
                                                 isScrubbing = false
-                                                
-                                                // Apply all deferred updates using the stored target time (or current time as fallback)
                                                 let targetTime = pendingSeekTime ?? audioPlayer.currentTime
                                                 let duration = audioPlayer.duration
-                                                
-                                                // CRITICAL FIX: Wait for seek to complete and use ACTUAL audio time
-                                                // This ensures word highlighting matches where audio actually lands
                                                 Task { @MainActor in
-                                                    // Seek audio to final position and wait for completion
                                                     let actualTime = await audioPlayer.seekAndWait(to: targetTime)
-                                                    
-                                                // Reset search state before applying the new time for accuracy
-                                                karaokeEngine.resetSearchState()
-                                                    
-                                                    // Always find the last word that ends at or before actualTime
+                                                    karaokeEngine.resetSearchState()
                                                     let indexedWords = karaokeEngine.getIndexedWords()
                                                     var lastSpokenWordIndex: Int? = nil
                                                     var lastSpokenWordEndTime: Double = 0
-                                                    
                                                     for word in indexedWords.reversed() {
                                                         if word.end <= actualTime && word.end.isFinite && word.start.isFinite {
                                                             lastSpokenWordIndex = word.id
@@ -1616,46 +1759,31 @@ struct OptimizedReaderView: View {
                                                             break
                                                         }
                                                     }
-                                                    
                                                     if let lastSpoken = lastSpokenWordIndex {
                                                         karaokeEngine.updateTime(lastSpokenWordEndTime, duration: duration)
                                                     }
-                                                    
-                                                    // Apply the actual landed time
                                                     karaokeEngine.updateTime(actualTime, duration: duration)
-                                                    
-                                                    // Haptic for current word if changed
                                                     if let currentWord = karaokeEngine.currentWordIndex,
                                                        currentWord != lastHapticWordIndex {
                                                         hapticGenerator?.impactOccurred(intensity: 0.7)
                                                         lastHapticWordIndex = currentWord
                                                     }
-                                                    
-                                                    // Clear pending seek time
                                                     pendingSeekTime = nil
-                                                    
-                                                    // Sync slider value to actual audio time after seek completes
                                                     sliderValue = actualTime
-                                                    
-                                                    // Instant jump to the scrubbed position (no animation - user expects immediate response)
                                                     jumpToSyncPosition(time: actualTime, animated: false)
-                                                    
-                                                    // CADisplayLink was never paused, so no need to resume
-                                                    // Everything is now synchronized to the new position
                                                 }
                                             }
                                         }
                                     }
                                 )
-                                .tint(readerColors.primary) // Thumb color
-                                .background(Color.clear) // Transparent background so custom track shows
+                                .tint(readerColors.primary)
+                                .background(Color.clear)
                                 
-                                // Bookmark tick marks (chapter-only)
+                                // Bookmark tick marks
                                 ForEach(Array(chapterBookmarkTimesSorted.enumerated()), id: \.offset) { _, t in
                                     let duration = max(audioPlayer.duration, 1)
                                     let clamped = min(max(t, 0), duration)
                                     let x = geometry.size.width * CGFloat(clamped / duration)
-                                    
                                     Rectangle()
                                         .fill(bookmarkMarkerColor.opacity(0.95))
                                         .frame(width: 2, height: 12)
@@ -1671,166 +1799,208 @@ struct OptimizedReaderView: View {
                             Text(formatTime(audioPlayer.currentTime))
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundColor(readerColors.textSecondary)
-                            
                             Spacer()
-                            
                             Text(formatTime(audioPlayer.duration))
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundColor(readerColors.textSecondary)
                         }
+                        .padding(.top, 20)
                     }
                     
-                    // Control Buttons
-                    HStack(spacing: 32) {
+                    // Playback Buttons
+                    HStack(spacing: 24) {
                         // Rewind 10s
                         Button(action: {
+                            rewindTapCount += 1
                             handleUserInteraction()
-                            
                             let currentTime = audioPlayer.getCurrentTime()
                             guard currentTime.isFinite && currentTime >= 0 else { return }
-                            
                             let newTime = max(0, currentTime - 10)
                             audioPlayer.seek(to: newTime)
-                            // Reset word sync and trigger update after seek
                             Task { @MainActor in
                                 karaokeEngine.resetSearchState()
                                 let updatedTime = audioPlayer.getCurrentTime()
                                 karaokeEngine.updateTime(updatedTime, duration: audioPlayer.duration)
-                                
-                                // Scroll to bring the new position into view
                                 jumpToSyncPosition(time: updatedTime)
                             }
                         }) {
                             Image(systemName: "gobackward.10")
-                                .font(.system(size: 24))
+                                .font(.system(size: 20))
                                 .foregroundColor(readerColors.text)
+                                .frame(width: 52, height: 52)
+                                .symbolEffect(.bounce, value: rewindTapCount)
                         }
+                        .buttonStyle(.plain)
                         
                         // Play/Pause
                         Button(action: {
                             handleUserInteraction()
-                            
                             audioPlayer.togglePlayPause()
-                            
-                            // IMPORTANT: Keep UI responsive on tap.
-                            // The previous implementation scanned ~10k words on the main thread, which can
-                            // stall input long enough to trigger "System gesture gate timed out".
-                            // KaraokeEngine already tracks last-spoken incrementally; a single update is enough.
                             Task { @MainActor in
                                 let t = audioPlayer.getCurrentTime()
                                 karaokeEngine.resetSearchState()
                                 karaokeEngine.updateTime(t, duration: audioPlayer.duration)
-                                
                                 if let sentenceIndex = findSentenceAtTime(t) {
                                     currentSentenceIndex = sentenceIndex
                                 }
-                                
                                 scrollMode = audioPlayer.isPlaying ? .playing : .paused
                             }
                         }) {
                             Image(systemName: audioPlayer.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 28, weight: .semibold))
+                                .font(.system(size: 34, weight: .semibold))
                                 .foregroundColor(readerColors.text)
-                                .frame(width: 64, height: 64)
+                                .frame(width: 60, height: 60)
+                                .contentTransition(.symbolEffect(.replace))
                         }
+                        .buttonStyle(.plain)
                         
                         // Forward 10s
                         Button(action: {
+                            forwardTapCount += 1
                             handleUserInteraction()
-                            
                             let currentTime = audioPlayer.getCurrentTime()
                             guard currentTime.isFinite && currentTime >= 0 else { return }
-                            
                             let newTime = min(audioPlayer.duration, currentTime + 10)
                             audioPlayer.seek(to: newTime)
-                            // Reset word sync and trigger update after seek
                             Task { @MainActor in
                                 karaokeEngine.resetSearchState()
                                 let updatedTime = audioPlayer.getCurrentTime()
                                 karaokeEngine.updateTime(updatedTime, duration: audioPlayer.duration)
-                                
-                                // Scroll to bring the new position into view
                                 jumpToSyncPosition(time: updatedTime)
                             }
                         }) {
                             Image(systemName: "goforward.10")
-                                .font(.system(size: 24))
+                                .font(.system(size: 20))
                                 .foregroundColor(readerColors.text)
+                                .frame(width: 52, height: 52)
+                                .symbolEffect(.bounce, value: forwardTapCount)
                         }
+                        .buttonStyle(.plain)
                     }
-                    
-                // Settings Button Row or Submenu
+                }
+                .padding(.horizontal, 20)
+                                            .padding(.vertical, 16)
+                                            .contentShape(Rectangle())
+                                            .gesture(
+                                                DragGesture(minimumDistance: 30)
+                                                    .onEnded { value in
+                                                        if abs(value.translation.height) > 60 {
+                                                            hideHeaderAndMenu()
+                                                        }
+                                                    }
+                                            )
+                                            .modifier(PlaybackCardGlassModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                                                                        .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
+                                                                        .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
+                                                                        .padding(.horizontal, 16)
+                                                                        .id(isLightBackground)
+
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                
+                // MARK: Floating Icon Row
                 if let activeSubmenu = activeSubmenu {
-                    // Show submenu
                     submenuView(for: activeSubmenu)
+                        .padding(.horizontal, 20)
+                        .transition(.opacity)
                 } else {
-                    // Show main settings buttons
                     settingsButtonRow
+                                            .transition(.opacity)
                 }
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 8)
-        } else {
-            // Collapsed state - show minimal indicator (no circle background, just arrow)
-            // Positioned at bottom of screen
-            HStack {
-                Spacer()
-                Button(action: {
-                    showHeader()
-                }) {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(readerColors.text)
-                }
-                Spacer()
-            }
-            .padding(.vertical, 8)
-            .contentShape(Rectangle()) // Make entire collapsed area swipeable
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 30)
-                    .onEnded { value in
-                        // Swipe up to expand menu and header
-                        if value.translation.height < -60 {
-                            showHeader()
+                
+            } else {
+                // MARK: Collapsed Pill
+                HStack(spacing: 12) {
+                    // Play/Pause (tapping this toggles, rest of pill expands)
+                    Button(action: {
+                        audioPlayer.togglePlayPause()
+                    }) {
+                        Image(systemName: audioPlayer.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(readerColors.text)
+                            .frame(width: 32)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    // Mini progress bar
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(isLightBackground ? Color.black.opacity(0.15) : Color.white.opacity(0.2))
+                                .frame(height: 3)
+                            
+                            Capsule()
+                                .fill(readerColors.primary)
+                                .frame(width: geo.size.width * CGFloat(audioPlayer.currentTime / max(audioPlayer.duration, 1)), height: 3)
                         }
                     }
-            )
-        }
-        }
-        .padding(.bottom, getSafeAreaBottom()) // Add home indicator safe area padding
-        .background {
-            if #available(iOS 26.0, *) {
-                LinearGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: readerColors.background.opacity(0.15), location: 0),
-                        .init(color: readerColors.background.opacity(0.75), location: 0.05),
-                        .init(color: readerColors.background.opacity(0.85), location: 0.2),
-                        .init(color: readerColors.background.opacity(0.9), location: 0.3),
-                        .init(color: readerColors.background.opacity(1), location: 1)
-                    ]),
-                    startPoint: .top,
-                    endPoint: .bottom
+                    .frame(height: 3)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .frame(width: 220)
+                .modifier(CollapsedPillGlassModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                                .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 6)
+                                .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
+                
+                .contentShape(Rectangle())
+                .onTapGesture { showHeader() }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 30)
+                        .onEnded { value in
+                            if value.translation.height < -30 {
+                                showHeader()
+                            }
+                        }
                 )
-                .ignoresSafeArea(edges: .bottom) // Extend background to bottom of screen
-            } else {
-                readerColors.card
-                    .ignoresSafeArea(edges: .bottom) // Extend background to bottom of screen
-            }
-        }
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(readerColors.cardBorder),
-            alignment: .top
-        )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } // end else
+        } // end VStack
+        
+        .padding(.bottom, getSafeAreaBottom() + 8)
+                .interactiveDismissDisabled(isMenuExpanded || isNoteEditorPresented)
+                
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isMenuExpanded)
         .overlay(alignment: .top) {
-            if isOutOfSync {
-                backToSyncButton
-                    .offset(y: isSearchActive ? -80 : -50) // Move higher when search is active to avoid search bar
-                    .transition(.opacity)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isOutOfSync)
+            ZStack {
+                if isOutOfSync {
+                    backToSyncButton
+                        .transition(.opacity)
+                        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isOutOfSync)
+                }
+                HStack {
+                    Spacer()
+                    if let returnTime = bookmarkJumpReturnTime {
+                        Button(action: {
+                            performBookmarkJump(to: returnTime, saveReturn: false)
+                            bookmarkJumpReturnTime = nil
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrowshape.turn.up.left.fill")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(formatTime(returnTime))
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            }
+                            .foregroundColor(readerColors.text)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background {
+                                if #available(iOS 26.0, *) {
+                                    Capsule().fill(.clear)
+                                } else {
+                                    Capsule().fill(readerColors.primary)
+                                }
+                            }
+                            .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
+                            .modifier(GlassCapsuleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .transition(.opacity)
+                        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: bookmarkJumpReturnTime)
+                    }
+                }
+                .padding(.horizontal, 16)
             }
+            .offset(y: isSearchActive ? -80 : -50)
             GeometryReader { geo in
                 Color.clear
                     .preference(
@@ -1841,7 +2011,6 @@ struct OptimizedReaderView: View {
             .frame(height: 0)
         }
     }
-    
     // MARK: - Back to Sync Button
     private var backToSyncButton: some View {
         Button(action: {
@@ -1853,15 +2022,21 @@ struct OptimizedReaderView: View {
                 Text("Back to Sync")
                     .font(.system(size: 14, weight: .semibold))
             }
-            .foregroundColor(readerColors.primaryText)
+            .foregroundColor(readerColors.text)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(readerColors.primary)
-            .clipShape(Capsule())
+            .background {
+                if #available(iOS 26.0, *) {
+                    Capsule().fill(.clear)
+                } else {
+                    Capsule().fill(readerColors.primary)
+                }
+            }
             .shadow(color: Color.black.opacity(0.25), radius: 8, x: 0, y: 4)
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
+            .modifier(GlassCapsuleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))        }
+                    .buttonStyle(PlainButtonStyle())
+                    .contentShape(Rectangle().inset(by: -16))
+                }
     
     // MARK: - Bookmarking
     private var currentBookmarkId: String {
@@ -1883,7 +2058,7 @@ struct OptimizedReaderView: View {
     private var isCurrentBookmarkDescription: Bool {
         preloadedData.chapter.order < 0
     }
-
+    
     private var chapterBookmarkTimesSorted: [Double] {
         chapterBookmarksBySentenceIndex.values.sorted()
     }
@@ -1898,7 +2073,7 @@ struct OptimizedReaderView: View {
             Image(systemName: isCurrentSentenceBookmarked ? "bookmark.fill" : "bookmark")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(isCurrentSentenceBookmarked ? readerColors.primary : readerColors.text)
-                .frame(width: 44, height: 44)
+                .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
         }
         .onTapGesture {
             Task { @MainActor in
@@ -2017,7 +2192,7 @@ struct OptimizedReaderView: View {
                     .foregroundColor(readerColors.cardBorder),
                 alignment: .top
             )
-            }
+        }
     }
     
     // MARK: - Search Results Overlay
@@ -2063,16 +2238,16 @@ struct OptimizedReaderView: View {
                             .padding(.vertical, 12)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
-                                    .fill(index == currentSearchMatchIndex 
-                                        ? readerColors.primary.opacity(0.15) 
-                                        : readerColors.card.opacity(0.8))
+                                    .fill(index == currentSearchMatchIndex
+                                          ? readerColors.primary.opacity(0.15)
+                                          : readerColors.card.opacity(0.8))
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10)
                                     .strokeBorder(
-                                        index == currentSearchMatchIndex 
-                                            ? readerColors.primary.opacity(0.5)
-                                            : readerColors.cardBorder.opacity(0.5),
+                                        index == currentSearchMatchIndex
+                                        ? readerColors.primary.opacity(0.5)
+                                        : readerColors.cardBorder.opacity(0.5),
                                         lineWidth: 1
                                     )
                             )
@@ -2129,7 +2304,7 @@ struct OptimizedReaderView: View {
                 startTime: sentence.startTime,
                 text: sentence.text
             )
-
+            
             if didSave {
                 chapterBookmarksBySentenceIndex[sentenceIndex] = sentence.startTime
             } else {
@@ -2142,7 +2317,7 @@ struct OptimizedReaderView: View {
             bookmarkService.lastErrorMessage = "Bookmark failed: \(error.localizedDescription)"
         }
     }
-
+    
     @MainActor
     private func triggerBookmarkHaptic() {
         let generator = UIImpactFeedbackGenerator(style: .light)
@@ -2153,11 +2328,21 @@ struct OptimizedReaderView: View {
     @MainActor
     private func presentBookmarkToast(saved: Bool, startTime: Double) {
         bookmarkToastTask?.cancel()
-        
+        let timeText = PlaybackTimeFormatter.string(from: startTime)
+
         withAnimation(.easeInOut(duration: 0.18)) {
             bookmarkToast = BookmarkToast(
                 kind: saved ? .saved : .removed,
-                timeText: PlaybackTimeFormatter.string(from: startTime)
+                timeText: timeText
+            )
+        }
+
+        // Push bookmark event to Dynamic Island
+        if saved {
+            ReadingActivityManager.shared.bookmark(
+                timeText: timeText,
+                currentTime: audioPlayer.currentTime,
+                duration: audioPlayer.duration
             )
         }
         
@@ -2168,7 +2353,7 @@ struct OptimizedReaderView: View {
             }
         }
     }
-
+    
     @MainActor
     private func rebuildChapterBookmarkCache() {
         var map: [Int: Double] = [:]
@@ -2183,12 +2368,11 @@ struct OptimizedReaderView: View {
     
     @MainActor
     private func openBookmarkEditorForCurrentSentence() async {
+        // Ensure the sentence is bookmarked first (note requires a bookmark)
         guard bookmarkService.uid != nil else { return }
-        
         let sentenceIndex = currentSentenceIndex
         guard sentenceIndex >= 0, sentenceIndex < preloadedData.sentences.count else { return }
         let sentence = preloadedData.sentences[sentenceIndex]
-        
         do {
             let bookmark = try await bookmarkService.ensureBookmark(
                 bookId: preloadedData.book.id,
@@ -2200,229 +2384,498 @@ struct OptimizedReaderView: View {
                 text: sentence.text
             )
             chapterBookmarksBySentenceIndex[sentenceIndex] = bookmark.startTime
-            bookmarkEditorId = bookmark.id
-            isBookmarkEditorPresented = true
         } catch {
             bookmarkService.lastErrorMessage = "Bookmark failed: \(error.localizedDescription)"
+        }
+        // Open inline note editor
+        noteEditorSentenceIndex = sentenceIndex
+        noteEditorText = chapterNotesBySentenceIndex[sentenceIndex] ?? ""
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
+            isNoteEditorPresented = true
+        }
+        // Auto-open keyboard after card animates in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            isNoteFieldFocused = true
         }
     }
     
     // MARK: - Settings Button Row
-    private var settingsButtonRow: some View {
-        HStack(spacing: 12) {
-            // Bookmark (tap toggle, long-press organize)
-            bookmarkCircleButton
-            
-            // Search button
-            Button(action: {
-                handleUserInteraction()
+        private var settingsButtonRow: some View {
+            GeometryReader { geo in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 20) {
+                        // Bookmark (tap toggle, long-press organize)
+                        bookmarkCircleButton
+                        
+                        // Bookmark Jump button
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                activeSubmenu = .bookmarks
+                            }
+                        }) {
+                            Image(systemName: chapterBookmarksBySentenceIndex.isEmpty ? "mappin" : "mappin.circle.fill")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(chapterBookmarksBySentenceIndex.isEmpty ? readerColors.text.opacity(0.4) : readerColors.primary)
+                                .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                        }
+                        // Search button
+                        Button(action: {
+                            handleUserInteraction()
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                isSearchActive.toggle()
+                                if isSearchActive {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                        isSearchFieldFocused = true
+                                    }
+                                } else {
+                                    closeSearch()
+                                }
+                            }
+                        }) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(readerColors.text)
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                        }
+                        
+                        // Highlight Color button
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                activeSubmenu = .highlight
+                            }
+                        }) {
+                            Image(systemName: "paintbrush.fill")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(highlightColor == .none ? readerColors.text : highlightColor.color)
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                        }
+                        
+                        // Background Color button
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                activeSubmenu = .background
+                            }
+                        }) {
+                            Image(systemName: "paintpalette.fill")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(readerColors.text)
+                                .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                                .overlay(alignment: .topTrailing) {
+                                    Circle()
+                                        .fill(readerBackgroundColor.color)
+                                        .frame(width: 10, height: 10)
+                                        .padding(2)
+                                }
+                        }
+                        
+                        // Playback Speed button
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                activeSubmenu = .speed
+                            }
+                        }) {
+                            Image(systemName: "speedometer")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(readerColors.text)
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                        }
+                        
+                        // Font button
+                                                Button(action: {
+                                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                                        activeSubmenu = .font
+                                                    }
+                                                }) {
+                                                    Image(systemName: "f.cursive")
+                                                        .font(.system(size: 20, weight: .semibold))
+                                                        .foregroundColor(readerFont == .system ? readerColors.text : readerColors.primary)
+                                                        .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                                                }
+                                                
+                                                // Text Size button
+                                                Button(action: {
+                                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                                        activeSubmenu = .textSize
+                                                    }
+                                                }) {
+                                                    Image(systemName: "textformat.size")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(readerColors.text)
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                        }
+                        
+                        // Sleep Timer
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                activeSubmenu = .sleepTimer
+                            }
+                        }) {
+                            Image(systemName: sleepTimerEndDate != nil ? "moon.fill" : "moon")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(sleepTimerEndDate != nil ? readerColors.primary : readerColors.text)
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .frame(minWidth: geo.size.width)
+                }
+                .frame(width: geo.size.width)
+            }
+            .frame(height: 44 + 24)
+            .padding(.vertical, -12)
+        }
+        
+        // MARK: - Submenu View
+        private func submenuView(for submenu: SubmenuType) -> some View {
+            HStack(spacing: 12) {
+                // Back button
+                Button(action: {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        activeSubmenu = nil
+                    }
+                }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(readerColors.text)
+                        .frame(width: 44, height: 44)
+                }
                 
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    isSearchActive.toggle()
-                    if isSearchActive {
-                        // Collapse menu when opening search
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            isMenuExpanded = false
-                        }
-                        // Focus search field when opening
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            isSearchFieldFocused = true
-                        }
-                    } else {
-                        closeSearch()
-                    }
+                // Submenu options
+                switch submenu {
+                case .speed:
+                    speedSubmenuView
+                case .textSize:
+                    textSizeSubmenuView
+                case .highlight:
+                    highlightSubmenuView
+                case .background:
+                    backgroundSubmenuView
+                case .sleepTimer:
+                    sleepTimerSubmenuView
+                case .bookmarks:
+                                    bookmarkJumpSubmenuView
+                                case .font:
+                                    fontSubmenuView
                 }
-            }) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(readerColors.text)
-                    .frame(width: 44, height: 44)
-            }
-            
-            // Playback Speed button
-            Button(action: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    activeSubmenu = .speed
-                }
-            }) {
-                Image(systemName: "speedometer")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(readerColors.text)
-                    .frame(width: 44, height: 44)
-            }
-            
-            // Text Size button
-            Button(action: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    activeSubmenu = .textSize
-                }
-            }) {
-                Image(systemName: "textformat.size")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(readerColors.text)
-                    .frame(width: 44, height: 44)
-            }
-            
-            // Highlight Color button
-            Button(action: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    activeSubmenu = .highlight
-                }
-            }) {
-                Image(systemName: "paintbrush.fill")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(highlightColor == .none ? readerColors.text : highlightColor.color)
-                    .frame(width: 44, height: 44)
-            }
-            
-            // Background Color button
-            Button(action: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    activeSubmenu = .background
-                }
-            }) {
-                Image(systemName: "paintpalette.fill")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(readerColors.text)
-                    .frame(width: 44, height: 44)
-                    .overlay(alignment: .topTrailing) {
-                        Circle()
-                            .fill(readerBackgroundColor.color)
-                            .frame(width: 10, height: 10)
-                            .padding(2)
-                    }
             }
         }
-    }
-    
-    // MARK: - Submenu View
-    private func submenuView(for submenu: SubmenuType) -> some View {
-        HStack(spacing: 12) {
-            // Back button
-            Button(action: {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    activeSubmenu = nil
-                }
-            }) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(readerColors.text)
-                    .frame(width: 44, height: 44)
-            }
-            
-            // Submenu options
-            switch submenu {
-            case .speed:
-                speedSubmenuView
-            case .textSize:
-                textSizeSubmenuView
-            case .highlight:
-                highlightSubmenuView
-            case .background:
-                backgroundSubmenuView
-            }
-        }
-    }
     
     // MARK: - Speed Submenu
     private var speedSubmenuView: some View {
-        HStack(spacing: 12) {
-            ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                Button(action: {
-                    playbackSpeed = speed
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        activeSubmenu = nil
-                    }
-                }) {
-                    Text(String(format: "%.2fx", speed))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(playbackSpeed == speed ? readerColors.primary : readerColors.text)
-                        .frame(width: 44, height: 44)
+            HStack(spacing: 12) {
+                ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
+                    Button(action: {
+                        playbackSpeed = speed
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            activeSubmenu = nil
+                        }
+                    }) {
+                        Text(speed == 1.0 ? "1x" : String(format: "%.2gx", speed))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(playbackSpeed == speed ? readerColors.primary : readerColors.text)
+                        .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                    }
                 }
             }
         }
-    }
-    
     // MARK: - Text Size Submenu
     private var textSizeSubmenuView: some View {
-        HStack(spacing: 12) {
-            ForEach(TextSize.allCases, id: \.self) { size in
-                Button(action: {
-                    textSize = size
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        activeSubmenu = nil
-                    }
-                }) {
-                    Text(size.rawValue)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(textSize == size ? readerColors.primary : readerColors.text)
-                        .frame(width: 44, height: 44)
+            HStack(spacing: 12) {
+                ForEach(TextSize.allCases, id: \.self) { size in
+                    Button(action: {
+                        textSize = size
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            activeSubmenu = nil
+                        }
+                    }) {
+                        Text(size.rawValue)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(textSize == size ? readerColors.primary : readerColors.text)
+                        .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                    }
                 }
             }
         }
-    }
     
     // MARK: - Highlight Color Submenu
     private var highlightSubmenuView: some View {
-        HStack(spacing: 12) {
-            ForEach(HighlightColor.allCases, id: \.self) { color in
-                Button(action: {
-                    highlightColor = color
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        activeSubmenu = nil
-                    }
-                }) {
-                    Group {
-                        if color == .none {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(highlightColor == color ? readerColors.primary : readerColors.text)
-                        } else {
-                            Circle()
-                                .fill(color.color)
-                                .frame(width: 24, height: 24)
+            HStack(spacing: 12) {
+                ForEach(HighlightColor.allCases, id: \.self) { color in
+                    Button(action: {
+                        highlightColor = color
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            activeSubmenu = nil
+                        }
+                    }) {
+                        Group {
+                            if color == .none {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 18, weight: .semibold))
+                                    .foregroundColor(highlightColor == color ? readerColors.primary : readerColors.text)
+                                .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                            } else {
+                                Circle()
+                                    .fill(color.color)
+                                    .frame(width: 24, height: 24)
+                                    .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                                    .overlay {
+                                        if highlightColor == color {
+                                            Circle()
+                                                .strokeBorder(readerColors.primary, lineWidth: 2)
+                                                .frame(width: 44, height: 44)
+                                        }
+                                    }
+                            }
                         }
                     }
-                    .frame(width: 44, height: 44)
                 }
             }
         }
+    
+    // MARK: - Bookmark Jump Submenu
+    private var bookmarkJumpSubmenuView: some View {
+        HStack(spacing: 8) {
+            
+            if chapterBookmarksBySentenceIndex.isEmpty {
+                Text("No bookmarks yet")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(readerColors.textSecondary)
+                    .frame(maxWidth: .infinity)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        // Sort bookmarks by startTime so they appear in chapter order
+                        ForEach(chapterBookmarksBySentenceIndex.sorted(by: { $0.value < $1.value }), id: \.key) { sentenceIndex, startTime in
+                            Button(action: {
+                                performBookmarkJump(to: startTime, saveReturn: true)
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                    activeSubmenu = nil
+                                }
+                            }) {
+                                Text(formatTime(startTime))
+                                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(readerColors.text)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(readerColors.card)
+                                    .clipShape(Capsule())
+                                    .overlay(
+                                        Capsule()
+                                            .strokeBorder(readerColors.cardBorder, lineWidth: 1)
+                                    )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Font Submenu
+        private var fontSubmenuView: some View {
+            HStack(spacing: 12) {
+                ForEach(ReaderFont.allCases, id: \.self) { font in
+                    Button(action: {
+                        readerFont = font
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            activeSubmenu = nil
+                        }
+                    }) {
+                        Text(font.displayName)
+                            .font(font.swiftUIFont(size: 15))
+                            .foregroundColor(readerFont == font ? readerColors.primary : readerColors.text)
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                    }
+                }
+            }
+        }
+
+    // MARK: - Inline Note Editor Overlay
+    private var noteEditorOverlay: some View {
+        NoteEditorCard(
+            sentenceText: noteEditorSentenceIndex >= 0 && noteEditorSentenceIndex < preloadedData.sentences.count
+                ? preloadedData.sentences[noteEditorSentenceIndex].text : "",
+            sentenceIndex: noteEditorSentenceIndex,
+            noteText: $noteEditorText,
+            isNoteFieldFocused: $isNoteFieldFocused,
+            hasExistingNote: chapterNotesBySentenceIndex[noteEditorSentenceIndex] != nil,
+            keyboardHeight: keyboardHeight,
+            readerFont: readerFont,
+            readerColors: readerColors,
+            isLightBackground: isLightBackground,
+            usesDominantColorBackground: usesDominantColorBackground,
+            onSave: { text in
+                saveNote(text, for: noteEditorSentenceIndex)
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    isNoteEditorPresented = false
+                }
+            },
+            onDelete: {
+                saveNote("", for: noteEditorSentenceIndex)
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    isNoteEditorPresented = false
+                }
+            },
+            onDismiss: {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    isNoteEditorPresented = false
+                }
+            }
+        )
+    }
+
+
+        // MARK: - Sleep Timer Submenu
+    private var sleepTimerSubmenuView: some View {
+            HStack(spacing: 12) {
+                ForEach([10, 15, 30, 45], id: \.self) { minutes in
+                    Button(action: {
+                        setSleepTimer(minutes: minutes)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            activeSubmenu = nil
+                        }
+                    }) {
+                        let isActive = isSleepTimerSet(minutes: minutes)
+                        Text("\(minutes)m")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(isActive ? readerColors.primary : readerColors.text)
+                        .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                    }
+                }
+                
+                // Cancel button - only show if timer is active
+                if sleepTimerEndDate != nil {
+                    Button(action: {
+                        cancelSleepTimer()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            activeSubmenu = nil
+                        }
+                    }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(readerColors.text)
+                        .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                    }
+                }
+            }
+        }
+    
+    private func isSleepTimerSet(minutes: Int) -> Bool {
+        guard let endDate = sleepTimerEndDate else { return false }
+        let remaining = endDate.timeIntervalSinceNow
+        let target = Double(minutes) * 60
+        return abs(remaining - target) < 5
+    }
+    
+    private func setSleepTimer(minutes: Int) {
+        cancelSleepTimer()
+        let endDate = Date().addingTimeInterval(Double(minutes) * 60)
+        sleepTimerEndDate = endDate
+        
+        sleepTimerTask = Task { @MainActor in
+            let fadeStart = endDate.addingTimeInterval(-5)
+            let waitUntilFade = fadeStart.timeIntervalSinceNow
+            if waitUntilFade > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(waitUntilFade * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            
+            let steps = 20
+            for i in 0..<steps {
+                guard !Task.isCancelled else {
+                    audioPlayer.setVolume(1.0)
+                    return
+                }
+                let volume = Float(steps - i - 1) / Float(steps)
+                audioPlayer.setVolume(volume)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            
+            guard !Task.isCancelled else {
+                audioPlayer.setVolume(1.0)
+                return
+            }
+            
+            audioPlayer.pause()
+            audioPlayer.setVolume(1.0)
+            sleepTimerEndDate = nil
+        }
+    }
+    
+    private func performBookmarkJump(to time: Double, saveReturn: Bool) {
+        if saveReturn {
+            bookmarkJumpReturnTime = audioPlayer.currentTime
+        }
+        audioPlayer.pause()
+        isOutOfSync = false
+        
+        Task { @MainActor in
+            let actualTime = await audioPlayer.seekAndWait(to: time)
+            karaokeEngine.resetSearchState()
+            karaokeEngine.updateTime(actualTime, duration: audioPlayer.duration)
+            if let sentenceIndex = findSentenceAtTime(actualTime) {
+                currentSentenceIndex = sentenceIndex
+            }
+            jumpToSyncPosition(time: actualTime)
+        }
+    }
+    
+    private func cancelSleepTimer() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimerEndDate = nil
+        audioPlayer.setVolume(1.0)
     }
     
     // MARK: - Background Color Submenu
     private var backgroundSubmenuView: some View {
-        HStack(spacing: 12) {
-            ForEach(ReaderBackgroundColor.allCases, id: \.self) { color in
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.4)) {
-                        readerBackgroundColor = color
-                    }
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        activeSubmenu = nil
-                    }
-                }) {
-                    Circle()
-                        .fill(color.color)
-                        .frame(width: 28, height: 28)
-                        .overlay {
-                            if readerBackgroundColor == color {
-                                Circle()
-                                    .stroke(readerColors.primary, lineWidth: 2)
-                            }
-                        }
-                        .frame(width: 44, height: 44)
-                }
-            }
-        }
-    }
+              HStack(spacing: 12) {
+                  ForEach(ReaderBackgroundColor.allCases, id: \.self) { color in
+                      Button(action: {
+                          withAnimation(.easeInOut(duration: 0.4)) {
+                              readerBackgroundColor = color
+                              usesDominantColorBackground = false
+                          }
+                          withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                              activeSubmenu = nil
+                          }
+                      }) {
+                          Circle()
+                              .fill(color.color)
+                              .frame(width: 24, height: 24)
+                              .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                              .overlay {
+                                  if readerBackgroundColor == color && !usesDominantColorBackground {
+                                      Circle()
+                                          .strokeBorder(readerColors.primary, lineWidth: 2)
+                                          .frame(width: 44, height: 44)
+                                  }
+                              }
+                      }
+                  }
+                  
+                  // Dominant color swatch from book cover
+                  if let dominant = coverDominantColor {
+                      Button(action: {
+                          withAnimation(.easeInOut(duration: 0.4)) {
+                              usesDominantColorBackground = true
+                          }
+                          withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                              activeSubmenu = nil
+                          }
+                      }) {
+                          Circle()
+                              .fill(dominant)
+                              .frame(width: 24, height: 24)
+                              .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))                              .overlay {
+                                  if usesDominantColorBackground {
+                                      Circle()
+                                          .strokeBorder(readerColors.primary, lineWidth: 2)
+                                          .frame(width: 44, height: 44)
+                                  }
+                              }
+                      }
+                  }
+              }
+          }
     
     // MARK: - Audio Setup on Appear
     /// Called from onAppear to either skip loading (if already playing) or load fresh audio
     private func setupAudioOnAppear() {
         // Check if audio is already playing for this book/chapter
         let isAlreadyPlaying = audioPlayer.hasActiveSession &&
-                               audioPlayer.bookId == preloadedData.book.id &&
-                               audioPlayer.chapterNumber == (preloadedData.chapter.order + 1)
+        audioPlayer.bookId == preloadedData.book.id &&
+        audioPlayer.chapterNumber == (preloadedData.chapter.order + 1)
         
         if isAlreadyPlaying {
             print("⚡ OptimizedReaderView: Audio already loaded - skipping audio reload")
@@ -2590,7 +3043,7 @@ struct OptimizedReaderView: View {
         let y = min(max(topMargin / h, 0), 1)
         return UnitPoint(x: 0.5, y: y)
     }
-
+    
     // Destination for Back-to-Sync (and scrub-end) on long sentences: place current word near the center
     // of the visible reading band for a smoother "return to reading" experience.
     private var markerResyncAnchor: UnitPoint {
@@ -2599,7 +3052,7 @@ struct OptimizedReaderView: View {
         let y = min(max(targetY / h, 0), 1)
         return UnitPoint(x: 0.5, y: y)
     }
-
+    
     private var sentenceTextLayoutWidth: CGFloat {
         max(scrollViewWidth - (scrollContentHorizontalPadding * 2), 1)
     }
@@ -2630,7 +3083,7 @@ struct OptimizedReaderView: View {
         return max(scrollViewHeight - headerHeight - playbackControlsHeight - (safeMargin * 2), 100)
     }
     
-
+    
     
     
     // Estimate progress within the current sentence using word index
@@ -2677,7 +3130,7 @@ struct OptimizedReaderView: View {
         guard let proxy = overrideProxy ?? scrollProxy else { return }
         let t = time.isFinite && time >= 0 ? time : 0
         guard let sentenceIndex = findSentenceAtTime(t) else { return }
-
+        
         // Capture a best-effort current word for this time.
         let candidateWordIndex = karaokeEngine.getWordAtTime(t) ?? karaokeEngine.currentWordIndex
         let targetWordIndex: Int? = {
@@ -2751,7 +3204,7 @@ struct OptimizedReaderView: View {
         lastManualScrollTime = CACurrentMediaTime()
         
         doScroll {
-            proxy.scrollTo(sentenceID, anchor: .top)
+            proxy.scrollTo(sentenceID, anchor: .center)
         }
     }
     
@@ -2770,9 +3223,8 @@ struct OptimizedReaderView: View {
         let sentenceID = sentenceScrollID(sentenceIndex)
         pendingCenterSentenceIndex = sentenceIndex
         
-        // Smooth animation for sentence transitions during playback.
         scrollWithAnimation {
-            proxy.scrollTo(sentenceID, anchor: .top)
+            proxy.scrollTo(sentenceID, anchor: .center)
         }
     }
     
@@ -2834,17 +3286,47 @@ struct OptimizedReaderView: View {
     
     // Manually re-align scroll to the sentence at the current audio time
     private func resyncToCurrentSentence() {
-        // Cancel any ongoing user drag state
         isOutOfSync = false
         
-        // Force immediate jump without animation to override any scroll momentum
-        jumpToSyncPosition(time: getCurrentAudioTime(), animated: false)
-        
-        // Then do a smooth scroll to the final position after a brief delay
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
-            jumpToSyncPosition(time: getCurrentAudioTime(), animated: true)
+        // Step 1: Kill any active scroll momentum by freezing the underlying UIScrollView.
+        // SwiftUI's scrollTo is ignored while momentum is running — this stops it instantly.
+        if let scrollView = findActiveUIScrollView() {
+            scrollView.setContentOffset(scrollView.contentOffset, animated: false)
         }
+        
+        // Step 2: One frame delay to let SwiftUI reconcile after the freeze, then jump.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) {
+            guard let proxy = self.scrollProxy else { return }
+            let time = self.getCurrentAudioTime()
+            guard let sentenceIndex = self.findSentenceAtTime(time) else { return }
+            
+            self.currentSentenceIndex = sentenceIndex
+            self.lastManualScrollTime = CACurrentMediaTime()
+            self.pendingCenterSentenceIndex = sentenceIndex
+            
+            let sentenceID = self.sentenceScrollID(sentenceIndex)
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                proxy.scrollTo(sentenceID, anchor: .center)
+            }
+        }
+    }
+
+    /// Walks the UIView hierarchy to find the active UIScrollView backing the reader's ScrollView.
+    private func findActiveUIScrollView() -> UIScrollView? {
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first else { return nil }
+        return findScrollView(in: window)
+    }
+
+    private func findScrollView(in view: UIView) -> UIScrollView? {
+        // Prefer the deepest scrollview that is actually scrolling (has velocity)
+        for subview in view.subviews.reversed() {
+            if let found = findScrollView(in: subview) { return found }
+        }
+        if let sv = view as? UIScrollView, sv.isDragging || sv.isDecelerating {
+            return sv
+        }
+        return nil
     }
     
     // #region agent log helper
@@ -2874,10 +3356,10 @@ struct OptimizedReaderView: View {
     private func formatTime(_ seconds: Double) -> String {
         PlaybackTimeFormatter.string(from: seconds)
     }
-
+    
     // MARK: - Now Playing (Lock Screen / Control Center)
     @MainActor
-
+    
     private func stopPlaybackAndCleanup() {
         audioPlayer.stop()
         AudioSessionController.shared.onPauseRequested = nil
@@ -3077,887 +3559,954 @@ struct OptimizedReaderView: View {
             }
         }
         
-        // Load highlight color
-        if let savedHighlight = UserDefaults.standard.string(forKey: highlightColorKey),
+        // Load font
+                if let savedFont = UserDefaults.standard.string(forKey: readerFontKey),
+                   let font = ReaderFont(rawValue: savedFont) {
+                    readerFont = font
+                }
+                
+                // Load highlight color
+                if let savedHighlight = UserDefaults.standard.string(forKey: highlightColorKey),
            let color = HighlightColor(rawValue: savedHighlight) {
             highlightColor = color
         }
         
         // Load background color (default to system theme)
-        if let savedBackground = UserDefaults.standard.string(forKey: readerBackgroundColorKey),
+        if UserDefaults.standard.bool(forKey: "readerUsesDominantColor") {
+            usesDominantColorBackground = true
+        } else if let savedBackground = UserDefaults.standard.string(forKey: readerBackgroundColorKey),
            let color = ReaderBackgroundColor(rawValue: savedBackground) {
             readerBackgroundColor = color
         } else {
-            // Default to system theme
             readerBackgroundColor = themeManager.isDarkMode ? .dark : .light
         }
-    }
-}
 
-// MARK: - Optimized Sentence View (Individual Word Segments for Zero Lag)
-struct OptimizedSentenceView: View {
-    let sentence: PrecomputedSentence
-    let sentenceIndex: Int
-    let isBookmarked: Bool
-    let currentSentenceIndex: Int
-    let scrollIDSuffix: String
-    let lineMarkerID: String
-    let lineMarkerOffsetY: CGFloat
-    let currentWordIndex: Int?
-    let lastSpokenWordIndex: Int?
-    let themeColors: ThemeColors
-    let textSize: CGFloat
-    let highlightColor: HighlightColor
-    let indexedWords: [IndexedWord]
-    let explainableWordIndices: Set<Int>
-    let searchMatches: [Range<String.Index>] // Search match ranges in this sentence
-    let currentSearchMatchIndex: Int? // Index within searchMatches array of the currently selected match (nil if not in this sentence)
-    let containerWidth: CGFloat // Actual container width for accurate line break detection
-    let onSentenceTap: () -> Void
-    let onExplainableWordTap: (Int) -> Void
+        // Load saved notes for this chapter
+        loadNotesFromStorage()
+    }
+
+    private func noteStorageKey(for sentenceIndex: Int) -> String {
+        "note_\(preloadedData.book.id)_\(preloadedData.chapter.id)_\(sentenceIndex)"
+    }
+
+    private func loadNotesFromStorage() {
+        var map: [Int: String] = [:]
+        for index in 0..<preloadedData.sentences.count {
+            let key = noteStorageKey(for: index)
+            if let saved = UserDefaults.standard.string(forKey: key), !saved.isEmpty {
+                map[index] = saved
+            }
+        }
+        chapterNotesBySentenceIndex = map
+    }
+
+    private func saveNote(_ text: String, for sentenceIndex: Int) {
+        let key = noteStorageKey(for: sentenceIndex)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+            chapterNotesBySentenceIndex.removeValue(forKey: sentenceIndex)
+        } else {
+            UserDefaults.standard.set(trimmed, forKey: key)
+            chapterNotesBySentenceIndex[sentenceIndex] = trimmed
+        }
+    }
     
-    // Cache base AttributedString (build once, modify on updates)
-    // Invalidate cache when textSize or themeColors change
-    @State private var baseAttributedString: AttributedString?
-    @State private var cachedTextSize: CGFloat = 0
-    @State private var cachedThemeColorHash: Int = 0
     
-    // Check if sentence is finished (all words spoken and not current sentence)
-    private var isFinishedSentence: Bool {
-        // Sentence is finished (should have reduced opacity) only when it's not the current sentence
-        // This ensures sentences stay at full opacity until currentSentenceIndex changes to a different sentence
-        return sentenceIndex != currentSentenceIndex
-    }
+    // MARK: - Optimized Sentence View (Individual Word Segments for Zero Lag)
+    struct OptimizedSentenceView: View {
+        let sentence: PrecomputedSentence
+        let sentenceIndex: Int
+        let isBookmarked: Bool
+        let hasNote: Bool
+        let currentSentenceIndex: Int
+        let scrollIDSuffix: String
+        let lineMarkerID: String
+        let lineMarkerOffsetY: CGFloat
+        let currentWordIndex: Int?
+        let lastSpokenWordIndex: Int?
+        let themeColors: ThemeColors
+        let textSize: CGFloat
+        let readerFont: ReaderFont
+                let highlightColor: HighlightColor
+                let indexedWords: [IndexedWord]
+        let explainableWordIndices: Set<Int>
+        let searchMatches: [Range<String.Index>] // Search match ranges in this sentence
+        let currentSearchMatchIndex: Int? // Index within searchMatches array of the currently selected match (nil if not in this sentence)
+        let containerWidth: CGFloat // Actual container width for accurate line break detection
+        let onSentenceTap: () -> Void
+                let onSentenceLongPress: () -> Void
+                @State private var isLongPressing: Bool = false
+        let onExplainableWordTap: (Int) -> Void
+        
+        // Cache base AttributedString (build once, modify on updates)
+        // Invalidate cache when textSize or themeColors change
+        @State private var baseAttributedString: AttributedString?
+        @State private var cachedTextSize: CGFloat = 0
+        @State private var cachedThemeColorHash: Int = 0
+     
+        
+        // Check if sentence is finished (all words spoken and not current sentence)
+        private var isFinishedSentence: Bool {
+            // Sentence is finished (should have reduced opacity) only when it's not the current sentence
+            // This ensures sentences stay at full opacity until currentSentenceIndex changes to a different sentence
+            return sentenceIndex != currentSentenceIndex
+        }
+        
+        private var bookmarkMarkerColor: Color {
+            highlightColor == .none ? themeColors.accent : highlightColor.color
+        }
+        
+        private var bookmarkEdgeMarker: some View {
+            ZStack(alignment: .top) {
+                // The line — slightly thicker when a note is attached
+                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                    .fill(bookmarkMarkerColor)
+                    .frame(width: hasNote ? 3 : 2)
+                    .frame(maxHeight: .infinity, alignment: .top)
 
-    private var bookmarkMarkerColor: Color {
-        highlightColor == .none ? themeColors.accent : highlightColor.color
-    }
-
-    private var bookmarkEdgeMarker: some View {
-        RoundedRectangle(cornerRadius: 1, style: .continuous)
-            .fill(bookmarkMarkerColor)
-            .frame(width: 2) // Very thin but visible
-            .frame(maxHeight: .infinity, alignment: .top)
-            .offset(x: -20) // Matches LazyVStack .padding(.horizontal, 20) => sits on screen edge
+                // Small filled dot at top signals a note exists
+                if hasNote {
+                    Circle()
+                        .fill(bookmarkMarkerColor)
+                        .frame(width: 7, height: 7)
+                        .offset(y: 4)
+                }
+            }
+            .offset(x: -20)
             .padding(.top, 2)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
-    }
-    
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            // Use TappableTextView for accurate word-level tap detection
-            TappableTextView(
-                attributedText: buildNSAttributedString(),
-                explainableWordRanges: buildExplainableWordNSRanges(),
-                onWordTap: { wordIndex in
-                    onExplainableWordTap(wordIndex)
-                },
-                onBackgroundTap: {
-                    onSentenceTap()
-                }
-            )
+        }
+        
+                  var body: some View {
+            ZStack(alignment: .topLeading) {
+                // Use TappableTextView for accurate word-level tap detection
+                TappableTextView(
+                    attributedText: buildNSAttributedString(),
+                    explainableWordRanges: buildExplainableWordNSRanges(),
+                    onWordTap: { wordIndex in
+                        onExplainableWordTap(wordIndex)
+                    },
+                    onBackgroundTap: {
+                                            guard !isLongPressing else { return }
+                                            onSentenceTap()
+                                        }
+                )
                 .fixedSize(horizontal: false, vertical: true)
-            
-            // Single marker used for line-based auto-scroll (no PreferenceKey).
-            if sentenceIndex == currentSentenceIndex {
-                // IMPORTANT: This must be layout-driven (not `.offset`) so `ScrollViewReader.scrollTo`
-                // can target the marker's actual position. `offset` is a post-layout transform and
-                // often does not affect the scroll target calculation.
-                VStack(spacing: 0) {
-                    Color.clear
-                        .frame(height: max(lineMarkerOffsetY, 0))
-                    Color.clear
-                        .frame(width: 1, height: 1)
-                        .id(lineMarkerID)
-                }
-                .allowsHitTesting(false)
-            }
-        }
-        .overlay(alignment: .leading) {
-            if isBookmarked {
-                bookmarkEdgeMarker
-            }
-        }
-        .opacity(isFinishedSentence ? 0.5 : 1.0) // Apply 50% opacity to finished sentences
-        .onAppear {
-            // Build base string once on first appearance
-            let currentThemeHash = themeColors.text.hashValue
-            if baseAttributedString == nil || cachedTextSize != textSize || cachedThemeColorHash != currentThemeHash {
-                buildBaseAttributedString()
-                cachedTextSize = textSize
-                cachedThemeColorHash = currentThemeHash
-            }
-        }
-        .onChange(of: textSize) { _, newValue in
-            // CRITICAL FIX: Defer state modifications to avoid "modifying state during view update" warning
-            Task { @MainActor in
-                // Invalidate cache when text size changes
-                baseAttributedString = nil
-                cachedTextSize = newValue
-                buildBaseAttributedString()
-            }
-        }
-        .onChange(of: themeColors.text) { _, _ in
-            // CRITICAL FIX: Defer state modifications to avoid "modifying state during view update" warning
-            Task { @MainActor in
-                // CRITICAL: Invalidate cache when theme colors change to fix initial load bug
-                // This ensures text colors are correct on initial load with lighter backgrounds
-                baseAttributedString = nil
-                cachedThemeColorHash = themeColors.text.hashValue
-                buildBaseAttributedString()
-            }
-        }
-        .id("\(themeColors.text.hashValue)-\(themeColors.primary.hashValue)-\(themeColors.background.hashValue)") // Force rebuild when theme colors change (background color change)
-    }
-    
-    // Build base AttributedString once (Grok's approach - cache the base)
-    private func buildBaseAttributedString() {
-        let text = sentence.text
-         var base = AttributedString(text)
-        
-        // Set base styling with dynamic text size
-        base.font = .system(size: textSize, weight: .semibold)
-        
-        // Handle sentences with no matched words
-        // CRITICAL: Always use current themeColors (not cached) to fix initial load bug
-        if sentence.globalWordIndices.isEmpty {
-            base.foregroundColor = themeColors.text.opacity(0.5)
-        } else {
-            // Set default color for all text (will be overridden for specific words)
-            base.foregroundColor = themeColors.text.opacity(0.5)
-        }
-        
-        baseAttributedString = base
-    }
-    
-    // Build AttributedString efficiently - use cached base and only modify changed ranges
-    private func buildAttributedString() -> AttributedString {
-        // Build base if not cached or if theme colors have changed
-        let currentThemeHash = themeColors.text.hashValue
-        let needsCacheUpdate = baseAttributedString == nil || cachedThemeColorHash != currentThemeHash
-        
-        // CRITICAL FIX: Don't modify state during body calculation
-        // If cache is invalid, build a temporary string for this render
-        // Defer the actual cache update to happen asynchronously
-        let base: AttributedString
-        if needsCacheUpdate {
-            // Build temporary base without modifying state
-            let text = sentence.text
-            var tempBase = AttributedString(text)
-            tempBase.font = .system(size: textSize, weight: .semibold)
-            if sentence.globalWordIndices.isEmpty {
-                tempBase.foregroundColor = themeColors.text.opacity(0.5)
-            } else {
-                tempBase.foregroundColor = themeColors.text.opacity(0.5)
-            }
-            base = tempBase
-            
-            // Defer cache update to happen after body calculation
-            DispatchQueue.main.async {
-                buildBaseAttributedString()
-                cachedThemeColorHash = currentThemeHash
-            }
-        } else if let cachedBase = baseAttributedString {
-            base = cachedBase
-        } else {
-            // Fallback if base building failed
-            var attributed = AttributedString(sentence.text)
-            attributed.font = .system(size: textSize, weight: .semibold)
-            attributed.foregroundColor = themeColors.text.opacity(0.5)
-            return attributed
-        }
-        
-        // Create mutable copy (O(1) operation - Grok's approach)
-        // AttributedString is a value type, so assignment creates a copy
-        var attributed = base
-        let text = sentence.text
-        
-        // Handle sentences with no matched words
-        guard !sentence.globalWordIndices.isEmpty else {
-            return attributed
-        }
-        
-        // Build sorted ranges first (needed for both highlight and punctuation)
-        let sortedRanges = sentence.wordRanges
-            .filter { sentence.globalWordIndices.contains($0.wordIndex) }
-            .sorted { $0.range.lowerBound < $1.range.lowerBound }
-        
-        // Apply word colors efficiently (purely by time-based currentWordIndex; ignore sentence gating)
-        for (wordIndex, range) in sentence.wordRanges {
-            guard sentence.globalWordIndices.contains(wordIndex) else { continue }
-            guard range.lowerBound >= text.startIndex,
-                  range.upperBound <= text.endIndex,
-                  range.lowerBound < range.upperBound else { continue }
-            
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-            
-            guard startOffset >= 0 && endOffset <= text.count && startOffset < endOffset,
-                  let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: startOffset, limitedBy: attributed.characters.endIndex),
-                  let attrEnd = attributed.characters.index(attrStart, offsetBy: endOffset - startOffset, limitedBy: attributed.characters.endIndex) else {
-                continue
-            }
-            
-            let attrRange = attrStart..<attrEnd
-            
-            // Apply color based on word state
-            if wordIndex == currentWordIndex {
-                attributed[attrRange].foregroundColor = themeColors.primary
-            } else if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
-                attributed[attrRange].foregroundColor = themeColors.text
-            } else {
-                attributed[attrRange].foregroundColor = themeColors.text.opacity(0.5)
-            }
-            
-            // Apply styling for explainable words - make them stand out subtly
-            if explainableWordIndices.contains(wordIndex) {
-                // Thick light blue underline for explainable words
-                attributed[attrRange].underlineStyle = .thick
-                let lightBlue = Color(red: 100/255, green: 180/255, blue: 255/255) // Brighter blue
-                attributed[attrRange].underlineColor = UIColor(lightBlue)
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.6)
+                        .onEnded { _ in
+                                                    isLongPressing = true
+                                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                                    onSentenceLongPress()
+                                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                                        isLongPressing = false
+                                                    }
+                                                }
+                )
                 
-                // Make explainable words slightly brighter to draw attention (even when read)
-                if wordIndex != currentWordIndex {
-                    // Boost brightness: unread goes from 0.5 -> 0.75, read stays full but gets subtle tint
-                    if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
-                        // Already read - keep full brightness, underline does the work
-                    } else {
-                        // Unread - make brighter than normal unread words
-                        attributed[attrRange].foregroundColor = themeColors.text.opacity(0.75)
+                // Single marker used for line-based auto-scroll (no PreferenceKey).
+                if sentenceIndex == currentSentenceIndex {
+                    // IMPORTANT: This must be layout-driven (not `.offset`) so `ScrollViewReader.scrollTo`
+                    // can target the marker's actual position. `offset` is a post-layout transform and
+                    // often does not affect the scroll target calculation.
+                    VStack(spacing: 0) {
+                        Color.clear
+                            .frame(height: max(lineMarkerOffsetY, 0))
+                        Color.clear
+                            .frame(width: 1, height: 1)
+                            .id(lineMarkerID)
                     }
+                    .allowsHitTesting(false)
                 }
             }
-        }
-        
-        // Apply continuous highlight background for spoken/current words (includes punctuation)
-        // Get highlight ranges to check punctuation
-        var highlightRanges: [Range<Int>] = []
-        if highlightColor != .none {
-            highlightRanges = applyContinuousHighlight(to: &attributed, text: text, sortedRanges: sortedRanges)
-            
-            // Change underline to yellow for explainable words that are highlighted
-            // This ensures they remain visible on any highlight color
-            for (wordIndex, range) in sortedRanges {
-                if explainableWordIndices.contains(wordIndex) {
-                    let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-                    let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-                    let intRange = startOffset..<endOffset
-                    
-                    // Check if this word is within a highlighted range
-                    let isHighlighted = highlightRanges.contains { highlightRange in
-                        intRange.overlaps(highlightRange)
-                    }
-                    
-                    if isHighlighted {
-                        // Change to yellow thick underline only when highlight is BLUE (for contrast)
-                        // Otherwise keep the blue underline for other highlight colors
-                        let attrRange = AttributedString.Index(range.lowerBound, within: attributed)!..<AttributedString.Index(range.upperBound, within: attributed)!
-                        if highlightColor == .blue {
-                            let yellow = Color(red: 255/255, green: 200/255, blue: 0/255) // Bright yellow
-                            attributed[attrRange].underlineColor = UIColor(yellow)
-                        }
-                        // For other colors, keep the light blue underline
-                    }
+            .overlay(alignment: .leading) {
+                if isBookmarked {
+                    bookmarkEdgeMarker
                 }
             }
+            .opacity(isFinishedSentence ? 0.5 : 1.0) // Apply 50% opacity to finished sentences
+            .onAppear {
+                // Build base string once on first appearance
+                let currentThemeHash = themeColors.text.hashValue
+                if baseAttributedString == nil || cachedTextSize != textSize || cachedThemeColorHash != currentThemeHash {
+                    buildBaseAttributedString()
+                    cachedTextSize = textSize
+                    cachedThemeColorHash = currentThemeHash
+                }
+            }
+            .onChange(of: textSize) { _, newValue in
+                // CRITICAL FIX: Defer state modifications to avoid "modifying state during view update" warning
+                Task { @MainActor in
+                    // Invalidate cache when text size changes
+                    baseAttributedString = nil
+                    cachedTextSize = newValue
+                    buildBaseAttributedString()
+                }
+            }
+            .onChange(of: themeColors.text) { _, _ in
+                Task { @MainActor in
+                    baseAttributedString = nil
+                    cachedThemeColorHash = themeColors.text.hashValue ^ themeColors.background.hashValue;                   buildBaseAttributedString()
+                }
+            }
+            .onChange(of: themeColors.background) { _, _ in
+                Task { @MainActor in
+                    baseAttributedString = nil
+                    cachedThemeColorHash = themeColors.text.hashValue ^ themeColors.background.hashValue;                    buildBaseAttributedString()
+                }
+            }
+            .id("\(themeColors.text.hashValue)-\(themeColors.primary.hashValue)-\(themeColors.background.hashValue)") // Force rebuild when theme colors change (background color change)
         }
         
-        // Apply search match highlighting
-        for (matchIndex, matchRange) in searchMatches.enumerated() {
-            let startOffset = text.distance(from: text.startIndex, to: matchRange.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: matchRange.upperBound)
+        // Build base AttributedString once (Grok's approach - cache the base)
+        private func buildBaseAttributedString() {
+            let text = sentence.text
+            var base = AttributedString(text)
             
-            guard startOffset >= 0 && endOffset <= text.count && startOffset < endOffset,
-                  let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: startOffset, limitedBy: attributed.characters.endIndex),
-                  let attrEnd = attributed.characters.index(attrStart, offsetBy: endOffset - startOffset, limitedBy: attributed.characters.endIndex) else {
-                continue
-            }
+            // Set base styling with dynamic text size
+            base.font = readerFont.swiftUIFont(size: textSize)
             
-            let attrRange = attrStart..<attrEnd
-            // Check if this is the currently selected search match by index
-            let isCurrentMatch = currentSearchMatchIndex == matchIndex
-            
-            if isCurrentMatch {
-                // Green/teal background for current selected match - stands out from others
-                attributed[attrRange].backgroundColor = UIColor(Color.green.opacity(0.6))
+            // Handle sentences with no matched words
+            // CRITICAL: Always use current themeColors (not cached) to fix initial load bug
+            if sentence.globalWordIndices.isEmpty {
+                base.foregroundColor = themeColors.text.opacity(0.5)
             } else {
-                // Orange background for other search matches
-                attributed[attrRange].backgroundColor = UIColor(Color.orange.opacity(0.4))
+                // Set default color for all text (will be overridden for specific words)
+                base.foregroundColor = themeColors.text.opacity(0.5)
             }
-            // Black text for visibility
-            attributed[attrRange].foregroundColor = .black
+            
+            baseAttributedString = base
         }
         
-        // Apply punctuation styling (simplified - just follow word before it)
-        
-        var coveredRanges: [Range<Int>] = []
-        for (_, range) in sortedRanges {
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-            coveredRanges.append(startOffset..<endOffset)
-        }
-        
-        // Style uncovered characters (punctuation/spaces)
-        for (index, _) in text.enumerated() {
-            let isCovered = coveredRanges.contains { $0.contains(index) }
-            if !isCovered {
-                guard let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: index, limitedBy: attributed.characters.endIndex),
-                      let attrEnd = attributed.characters.index(attrStart, offsetBy: 1, limitedBy: attributed.characters.endIndex) else {
+        // Build AttributedString efficiently - use cached base and only modify changed ranges
+        private func buildAttributedString() -> AttributedString {
+            // Build base if not cached or if theme colors have changed
+            let currentThemeHash = themeColors.text.hashValue
+            let needsCacheUpdate = baseAttributedString == nil || cachedThemeColorHash != currentThemeHash
+            
+            // CRITICAL FIX: Don't modify state during body calculation
+            // If cache is invalid, build a temporary string for this render
+            // Defer the actual cache update to happen asynchronously
+            let base: AttributedString
+            if needsCacheUpdate {
+                // Build temporary base without modifying state
+                let text = sentence.text
+                var tempBase = AttributedString(text)
+                tempBase.font = readerFont.swiftUIFont(size: textSize)
+                if sentence.globalWordIndices.isEmpty {
+                    tempBase.foregroundColor = themeColors.text.opacity(0.5)
+                } else {
+                    tempBase.foregroundColor = themeColors.text.opacity(0.5)
+                }
+                base = tempBase
+                
+                // Defer cache update to happen after body calculation
+                DispatchQueue.main.async {
+                    buildBaseAttributedString()
+                    cachedThemeColorHash = currentThemeHash
+                }
+            } else if let cachedBase = baseAttributedString {
+                base = cachedBase
+            } else {
+                // Fallback if base building failed
+                var attributed = AttributedString(sentence.text)
+                attributed.font = readerFont.swiftUIFont(size: textSize)
+                attributed.foregroundColor = themeColors.text.opacity(0.5)
+                return attributed
+            }
+            
+            // Create mutable copy (O(1) operation - Grok's approach)
+            // AttributedString is a value type, so assignment creates a copy
+            var attributed = base
+            let text = sentence.text
+            
+            // Handle sentences with no matched words
+            guard !sentence.globalWordIndices.isEmpty else {
+                return attributed
+            }
+            
+            // Build sorted ranges first (needed for both highlight and punctuation)
+            let sortedRanges = sentence.wordRanges
+                .filter { sentence.globalWordIndices.contains($0.wordIndex) }
+                .sorted { $0.range.lowerBound < $1.range.lowerBound }
+            
+            // Apply word colors efficiently (purely by time-based currentWordIndex; ignore sentence gating)
+            for (wordIndex, range) in sentence.wordRanges {
+                guard sentence.globalWordIndices.contains(wordIndex) else { continue }
+                guard range.lowerBound >= text.startIndex,
+                      range.upperBound <= text.endIndex,
+                      range.lowerBound < range.upperBound else { continue }
+                
+                let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                
+                guard startOffset >= 0 && endOffset <= text.count && startOffset < endOffset,
+                      let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: startOffset, limitedBy: attributed.characters.endIndex),
+                      let attrEnd = attributed.characters.index(attrStart, offsetBy: endOffset - startOffset, limitedBy: attributed.characters.endIndex) else {
                     continue
                 }
                 
                 let attrRange = attrStart..<attrEnd
-
-                // If this character falls inside a highlight range, force it to black immediately.
-                // This prevents the punctuation pass from temporarily overriding the highlight styling
-                // until `lastSpokenWordIndex` advances.
-                let isInHighlight = highlightRanges.contains { $0.contains(index) }
-                if isInHighlight && highlightColor != .none {
-                    attributed[attrRange].foregroundColor = .black
-                    continue
-                }
                 
-                // Find the word before this position
-                let wordBefore = sortedRanges.last { wordRange in
-                    let wordEnd = text.distance(from: text.startIndex, to: wordRange.range.upperBound)
-                    return wordEnd <= index
-                }
-                
-                if let wordBefore = wordBefore,
-                   let lastSpoken = lastSpokenWordIndex,
-                   wordBefore.wordIndex <= lastSpoken {
-                    // Punctuation after spoken word - make black if in highlight, otherwise normal color
-                    if isInHighlight && highlightColor != .none {
-                        attributed[attrRange].foregroundColor = .black
-                    } else {
-                        attributed[attrRange].foregroundColor = themeColors.text
-                    }
+                // Apply color based on word state
+                if wordIndex == currentWordIndex {
+                    attributed[attrRange].foregroundColor = themeColors.primary
+                } else if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
+                    attributed[attrRange].foregroundColor = themeColors.text
                 } else {
                     attributed[attrRange].foregroundColor = themeColors.text.opacity(0.5)
                 }
-            }
-        }
-        
-        return attributed
-    }
-    
-    // MARK: - NSAttributedString for TappableTextView
-    
-    /// Build NSAttributedString for UIKit-based TappableTextView
-    /// Mirrors the logic from buildAttributedString() but returns NSAttributedString
-    private func buildNSAttributedString() -> NSAttributedString {
-        let text = sentence.text
-        let result = NSMutableAttributedString(string: text)
-        
-        // Base styling
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = textSize * 0.4
-        
-        let baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: textSize, weight: .semibold),
-            .foregroundColor: UIColor(themeColors.text.opacity(0.5)),
-            .paragraphStyle: paragraphStyle
-        ]
-        result.addAttributes(baseAttributes, range: NSRange(location: 0, length: text.count))
-        
-        // Handle sentences with no matched words
-        guard !sentence.globalWordIndices.isEmpty else {
-            return result
-        }
-        
-        // Build sorted ranges
-        let sortedRanges = sentence.wordRanges
-            .filter { sentence.globalWordIndices.contains($0.wordIndex) }
-            .sorted { $0.range.lowerBound < $1.range.lowerBound }
-        
-        // Apply word colors
-        for (wordIndex, range) in sentence.wordRanges {
-            guard sentence.globalWordIndices.contains(wordIndex) else { continue }
-            guard range.lowerBound >= text.startIndex,
-                  range.upperBound <= text.endIndex,
-                  range.lowerBound < range.upperBound else { continue }
-            
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let length = text.distance(from: range.lowerBound, to: range.upperBound)
-            let nsRange = NSRange(location: startOffset, length: length)
-            
-            // Apply color based on word state
-            let color: UIColor
-            if wordIndex == currentWordIndex {
-                color = UIColor(themeColors.primary)
-            } else if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
-                color = UIColor(themeColors.text)
-            } else {
-                color = UIColor(themeColors.text.opacity(0.5))
-            }
-            result.addAttribute(.foregroundColor, value: color, range: nsRange)
-            
-            // Apply styling for explainable words - make them stand out subtly
-            if explainableWordIndices.contains(wordIndex) {
-                // Thick light blue underline for explainable words
-                result.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: nsRange)
-                let lightBlue = UIColor(Color(red: 100/255, green: 180/255, blue: 255/255)) // Brighter blue
-                result.addAttribute(.underlineColor, value: lightBlue, range: nsRange)
                 
-                // Make explainable words slightly brighter to draw attention (even when read)
-                if wordIndex != currentWordIndex {
-                    if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
-                        // Already read - keep full brightness, underline does the work
-                    } else {
-                        // Unread - make brighter than normal unread words (0.75 vs 0.5)
-                        let brighterColor = UIColor(themeColors.text.opacity(0.75))
-                        result.addAttribute(.foregroundColor, value: brighterColor, range: nsRange)
-                    }
-                }
-            }
-        }
-        
-        // Apply highlight background if enabled
-        // HORIZONTAL: Words on same line connected (including spaces between)
-        // VERTICAL: Each line separate (highlight stops at line breaks)
-        // CRITICAL: Must match logic in applyContinuousHighlight() to prevent vertical bleeding
-        var highlightedNSRanges: [NSRange] = []  // Track highlighted ranges for punctuation styling
-        if highlightColor != .none, let lastSpoken = lastSpokenWordIndex {
-            // Find all words that should be highlighted (with their indices for consecutive checking)
-            let wordsToHighlight = sortedRanges
-                .filter { wordIndex, _ in wordIndex == currentWordIndex || wordIndex <= lastSpoken }
-            
-            if !wordsToHighlight.isEmpty {
-                // Group consecutive words into continuous ranges
-                // CRITICAL: Check for line breaks AND non-consecutive word indices
-                var continuousRanges: [(start: Int, end: Int)] = []
-                var currentStart: Int? = nil
-                var currentEnd: Int? = nil
-                var prevWordIndex: Int? = nil
-                
-                for (index, (wordIndex, range)) in wordsToHighlight.enumerated() {
-                    let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-                    let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-                    
-                    // Check if there's a line break before this word
-                    let hasLineBreakBefore: Bool = {
-                        if index == 0 { return false }
-                        let prevRange = wordsToHighlight[index - 1].range
-                        // SAFETY: Guard against overlapping word ranges to prevent crash
-                        guard prevRange.upperBound <= range.lowerBound else {
-                            return true  // Treat overlapping ranges as separate highlights
-                        }
-                        let textBetween = String(text[prevRange.upperBound..<range.lowerBound])
-                        return textBetween.contains("\n") || textBetween.contains("\r")
-                    }()
-                    
-                    // Check if this word is consecutive with the previous word in word indices
-                    let isConsecutiveWord: Bool = {
-                        guard let prev = prevWordIndex else { return true }
-                        return wordIndex == prev + 1
-                    }()
-                    
-                    // Determine if we should continue the current range or start a new one
-                    let shouldContinue: Bool = {
-                        guard let prevEnd = currentEnd else { return false }
-                        // Don't continue if there's a line break
-                        if hasLineBreakBefore { return false }
-                        // Don't continue if words aren't consecutive (handles hyphenated words)
-                        if !isConsecutiveWord { return false }
-                        // Don't continue if gap is too large
-                        let gap = startOffset - prevEnd
-                        return gap <= 3
-                    }()
-                    
-                    if shouldContinue {
-                        // Extend current range
-                        currentEnd = endOffset
-                    } else {
-                        // Save previous range and start new one
-                        if let start = currentStart, let end = currentEnd {
-                            continuousRanges.append((start: start, end: end))
-                        }
-                        currentStart = startOffset
-                        currentEnd = endOffset
-                    }
-                    
-                    prevWordIndex = wordIndex
-                }
-                
-                // Add final range
-                if let start = currentStart, let end = currentEnd {
-                    continuousRanges.append((start: start, end: end))
-                }
-                
-                // Extend each range to include adjacent punctuation (but not spaces or across lines)
-                var finalRanges: [(start: Int, end: Int)] = []
-                for range in continuousRanges {
-                    var startOffset = range.start
-                    var endOffset = range.end
-                    
-                    // Scan backward to include leading punctuation ONLY (quotes, etc.)
-                    // Stop at whitespace or line breaks
-                    while startOffset > 0 {
-                        let charIndex = text.index(text.startIndex, offsetBy: startOffset - 1)
-                        let char = text[charIndex]
-                        if char.isPunctuation && !char.isWhitespace && char != "\n" && char != "\r" {
-                            startOffset -= 1
-                        } else {
-                            break
-                        }
-                    }
-                    
-                    // Scan forward to include trailing punctuation ONLY
-                    // Stop at whitespace or line breaks
-                    while endOffset < text.count {
-                        let charIndex = text.index(text.startIndex, offsetBy: endOffset)
-                        let char = text[charIndex]
-                        if char.isPunctuation && !char.isWhitespace && char != "\n" && char != "\r" {
-                            endOffset += 1
-                        } else {
-                            break
-                        }
-                    }
-                    
-                    finalRanges.append((start: startOffset, end: endOffset))
-                }
-                
-                // Apply background to each range
-                // Use TextKit 2 to split ranges at visual line boundaries to prevent vertical bleeding
-                // This matches how UITextView renders text (TextKit 2 by default on iOS 16+)
-                let effectiveWidth = containerWidth > 0 ? containerWidth : UIScreen.main.bounds.width - 40
-                
-                // Create TextKit 2 layout infrastructure
-                let textContentStorage = NSTextContentStorage()
-                textContentStorage.attributedString = result
-                
-                let textLayoutManager = NSTextLayoutManager()
-                textContentStorage.addTextLayoutManager(textLayoutManager)
-                
-                let textContainer = NSTextContainer(size: CGSize(width: effectiveWidth, height: .greatestFiniteMagnitude))
-                textContainer.lineFragmentPadding = 0
-                textLayoutManager.textContainer = textContainer
-                
-                // Force layout calculation
-                textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
-                
-                // Collect all line break positions using TextKit 2
-                var lineBreakPositions: [Int] = []
-                textLayoutManager.enumerateTextLayoutFragments(
-                    from: textContentStorage.documentRange.location,
-                    options: [.ensuresLayout]
-                ) { fragment in
-                    for lineFragment in fragment.textLineFragments {
-                        let lineRange = lineFragment.characterRange
-                        if let elementRange = fragment.textElement?.elementRange,
-                           let startLocation = elementRange.location as? NSTextLocation {
-                            let documentOffset = textContentStorage.offset(
-                                from: textContentStorage.documentRange.location,
-                                to: startLocation
-                            )
-                            let lineEnd = documentOffset + lineRange.location + lineRange.length
-                            lineBreakPositions.append(lineEnd)
-                        }
-                    }
-                    return true
-                }
-                
-                // Apply highlights split at line boundaries
-                for range in finalRanges {
-                    var currentPos = range.start
-                    let rangeEnd = range.end
-                    
-                    while currentPos < rangeEnd {
-                        // Find the next line break after currentPos
-                        var segmentEnd = rangeEnd
-                        for lineBreak in lineBreakPositions {
-                            if lineBreak > currentPos && lineBreak < segmentEnd {
-                                segmentEnd = lineBreak
-                                break
-                            }
-                        }
-                        
-                        let segmentLength = segmentEnd - currentPos
-                        if segmentLength > 0 {
-                            let segmentRange = NSRange(location: currentPos, length: segmentLength)
-                            result.addAttribute(.backgroundColor, value: UIColor(highlightColor.color), range: segmentRange)
-                            result.addAttribute(.foregroundColor, value: UIColor.black, range: segmentRange)
-                            highlightedNSRanges.append(segmentRange)
-                        }
-                        
-                        currentPos = segmentEnd
-                    }
-                }
-            }
-            
-            // Change underline to yellow for explainable words that are highlighted
-            // This ensures they remain visible on any highlight color
-            for (wordIndex, range) in sortedRanges {
+                // Apply styling for explainable words - make them stand out subtly
                 if explainableWordIndices.contains(wordIndex) {
-                    let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-                    let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                    // Thick light blue underline for explainable words
+                    attributed[attrRange].underlineStyle = .thick
+                    let lightBlue = Color(red: 100/255, green: 180/255, blue: 255/255) // Brighter blue
+                    attributed[attrRange].underlineColor = UIColor(lightBlue)
                     
-                    // Check if this word is within a highlighted range
-                    let isHighlighted = highlightedNSRanges.contains { highlightRange in
-                        let wordStart = startOffset
-                        let wordEnd = endOffset
-                        let highlightStart = highlightRange.location
-                        let highlightEnd = highlightRange.location + highlightRange.length
-                        return wordStart < highlightEnd && wordEnd > highlightStart
-                    }
-                    
-                    if isHighlighted {
-                        // Change to yellow thick underline only when highlight is BLUE (for contrast)
-                        // Otherwise keep the blue underline for other highlight colors
-                        let nsRange = NSRange(location: startOffset, length: endOffset - startOffset)
-                        if highlightColor == .blue {
-                            let yellow = UIColor(Color(red: 255/255, green: 200/255, blue: 0/255)) // Bright yellow
-                            result.addAttribute(.underlineColor, value: yellow, range: nsRange)
+                    // Make explainable words slightly brighter to draw attention (even when read)
+                    if wordIndex != currentWordIndex {
+                        // Boost brightness: unread goes from 0.5 -> 0.75, read stays full but gets subtle tint
+                        if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
+                            // Already read - keep full brightness, underline does the work
+                        } else {
+                            // Unread - make brighter than normal unread words
+                            attributed[attrRange].foregroundColor = themeColors.text.opacity(0.75)
                         }
-                        // For other colors, keep the light blue underline
                     }
                 }
             }
-        }
-        
-        // Apply search match highlighting
-        for (matchIndex, matchRange) in searchMatches.enumerated() {
-            let startOffset = text.distance(from: text.startIndex, to: matchRange.lowerBound)
-            let length = text.distance(from: matchRange.lowerBound, to: matchRange.upperBound)
-            let nsRange = NSRange(location: startOffset, length: length)
             
-            // Check if this is the currently selected search match by index
-            let isCurrentMatch = currentSearchMatchIndex == matchIndex
-            
-            if isCurrentMatch {
-                // Green/teal background for current selected match - stands out from others
-                result.addAttribute(.backgroundColor, value: UIColor(Color.green.opacity(0.6)), range: nsRange)
-            } else {
-                // Orange background for other search matches
-                result.addAttribute(.backgroundColor, value: UIColor(Color.orange.opacity(0.4)), range: nsRange)
-            }
-            result.addAttribute(.foregroundColor, value: UIColor.black, range: nsRange)
-        }
-        
-        // Style punctuation (simplified - follow preceding word, respect highlights)
-        var coveredRanges: [Range<Int>] = []
-        for (_, range) in sortedRanges {
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-            coveredRanges.append(startOffset..<endOffset)
-        }
-        
-        for (index, _) in text.enumerated() {
-            let isCovered = coveredRanges.contains { $0.contains(index) }
-            if !isCovered {
-                let nsRange = NSRange(location: index, length: 1)
+            // Apply continuous highlight background for spoken/current words (includes punctuation)
+            // Get highlight ranges to check punctuation
+            var highlightRanges: [Range<Int>] = []
+            if highlightColor != .none {
+                highlightRanges = applyContinuousHighlight(to: &attributed, text: text, sortedRanges: sortedRanges)
                 
-                // Check if this character is within a highlighted range
-                let isInHighlight = highlightedNSRanges.contains { nsRange in
-                    index >= nsRange.location && index < nsRange.location + nsRange.length
+                // Change underline to yellow for explainable words that are highlighted
+                // This ensures they remain visible on any highlight color
+                for (wordIndex, range) in sortedRanges {
+                    if explainableWordIndices.contains(wordIndex) {
+                        let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                        let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                        let intRange = startOffset..<endOffset
+                        
+                        // Check if this word is within a highlighted range
+                        let isHighlighted = highlightRanges.contains { highlightRange in
+                            intRange.overlaps(highlightRange)
+                        }
+                        
+                        if isHighlighted {
+                            // Change to yellow thick underline only when highlight is BLUE (for contrast)
+                            // Otherwise keep the blue underline for other highlight colors
+                            let attrRange = AttributedString.Index(range.lowerBound, within: attributed)!..<AttributedString.Index(range.upperBound, within: attributed)!
+                            if highlightColor == .blue {
+                                let yellow = Color(red: 255/255, green: 200/255, blue: 0/255) // Bright yellow
+                                attributed[attrRange].underlineColor = UIColor(yellow)
+                            }
+                            // For other colors, keep the light blue underline
+                        }
+                    }
                 }
+            }
+            
+            // Apply search match highlighting
+            for (matchIndex, matchRange) in searchMatches.enumerated() {
+                let startOffset = text.distance(from: text.startIndex, to: matchRange.lowerBound)
+                let endOffset = text.distance(from: text.startIndex, to: matchRange.upperBound)
                 
-                // If in highlight, color is already black - skip
-                if isInHighlight {
+                guard startOffset >= 0 && endOffset <= text.count && startOffset < endOffset,
+                      let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: startOffset, limitedBy: attributed.characters.endIndex),
+                      let attrEnd = attributed.characters.index(attrStart, offsetBy: endOffset - startOffset, limitedBy: attributed.characters.endIndex) else {
                     continue
                 }
                 
-                // Find word before this position
-                let wordBefore = sortedRanges.last { wordRange in
-                    let wordEnd = text.distance(from: text.startIndex, to: wordRange.range.upperBound)
-                    return wordEnd <= index
-                }
+                let attrRange = attrStart..<attrEnd
+                // Check if this is the currently selected search match by index
+                let isCurrentMatch = currentSearchMatchIndex == matchIndex
                 
+                if isCurrentMatch {
+                    // Green/teal background for current selected match - stands out from others
+                    attributed[attrRange].backgroundColor = UIColor(Color.green.opacity(0.6))
+                } else {
+                    // Orange background for other search matches
+                    attributed[attrRange].backgroundColor = UIColor(Color.orange.opacity(0.4))
+                }
+                // Black text for visibility
+                attributed[attrRange].foregroundColor = .black
+            }
+            
+            // Apply punctuation styling (simplified - just follow word before it)
+            
+            var coveredRanges: [Range<Int>] = []
+            for (_, range) in sortedRanges {
+                let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                coveredRanges.append(startOffset..<endOffset)
+            }
+            
+            // Style uncovered characters (punctuation/spaces)
+            for (index, _) in text.enumerated() {
+                let isCovered = coveredRanges.contains { $0.contains(index) }
+                if !isCovered {
+                    guard let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: index, limitedBy: attributed.characters.endIndex),
+                          let attrEnd = attributed.characters.index(attrStart, offsetBy: 1, limitedBy: attributed.characters.endIndex) else {
+                        continue
+                    }
+                    
+                    let attrRange = attrStart..<attrEnd
+                    
+                    // If this character falls inside a highlight range, force it to black immediately.
+                    // This prevents the punctuation pass from temporarily overriding the highlight styling
+                    // until `lastSpokenWordIndex` advances.
+                    let isInHighlight = highlightRanges.contains { $0.contains(index) }
+                    if isInHighlight && highlightColor != .none {
+                        attributed[attrRange].foregroundColor = .black
+                        continue
+                    }
+                    
+                    // Find the word before this position
+                    let wordBefore = sortedRanges.last { wordRange in
+                        let wordEnd = text.distance(from: text.startIndex, to: wordRange.range.upperBound)
+                        return wordEnd <= index
+                    }
+                    
+                    if let wordBefore = wordBefore,
+                       let lastSpoken = lastSpokenWordIndex,
+                       wordBefore.wordIndex <= lastSpoken {
+                        // Punctuation after spoken word - make black if in highlight, otherwise normal color
+                        if isInHighlight && highlightColor != .none {
+                            attributed[attrRange].foregroundColor = .black
+                        } else {
+                            attributed[attrRange].foregroundColor = themeColors.text
+                        }
+                    } else {
+                        attributed[attrRange].foregroundColor = themeColors.text.opacity(0.5)
+                    }
+                }
+            }
+            
+            return attributed
+        }
+        
+        // MARK: - NSAttributedString for TappableTextView
+        
+        /// Build NSAttributedString for UIKit-based TappableTextView
+        /// Mirrors the logic from buildAttributedString() but returns NSAttributedString
+        private func buildNSAttributedString() -> NSAttributedString {
+            let text = sentence.text
+            let result = NSMutableAttributedString(string: text)
+            
+            // Base styling
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineSpacing = textSize * 0.4
+            
+            let baseAttributes: [NSAttributedString.Key: Any] = [
+                            .font: readerFont.uiFont(size: textSize),
+                .foregroundColor: UIColor(themeColors.text.opacity(0.5)),
+                .paragraphStyle: paragraphStyle
+            ]
+            result.addAttributes(baseAttributes, range: NSRange(location: 0, length: text.count))
+            
+            // Handle sentences with no matched words
+            guard !sentence.globalWordIndices.isEmpty else {
+                return result
+            }
+            
+            // Build sorted ranges
+            let sortedRanges = sentence.wordRanges
+                .filter { sentence.globalWordIndices.contains($0.wordIndex) }
+                .sorted { $0.range.lowerBound < $1.range.lowerBound }
+            
+            // Apply word colors
+            for (wordIndex, range) in sentence.wordRanges {
+                guard sentence.globalWordIndices.contains(wordIndex) else { continue }
+                guard range.lowerBound >= text.startIndex,
+                      range.upperBound <= text.endIndex,
+                      range.lowerBound < range.upperBound else { continue }
+                
+                let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let length = text.distance(from: range.lowerBound, to: range.upperBound)
+                let nsRange = NSRange(location: startOffset, length: length)
+                
+                // Apply color based on word state
                 let color: UIColor
-                if let wordBefore = wordBefore,
-                   let lastSpoken = lastSpokenWordIndex,
-                   wordBefore.wordIndex <= lastSpoken {
+                if wordIndex == currentWordIndex {
+                    color = UIColor(themeColors.primary)
+                } else if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
                     color = UIColor(themeColors.text)
                 } else {
                     color = UIColor(themeColors.text.opacity(0.5))
                 }
                 result.addAttribute(.foregroundColor, value: color, range: nsRange)
-            }
-        }
-        
-        return result
-    }
-    
-    /// Build NSRange array for explainable words (used by TappableTextView for hit testing)
-    private func buildExplainableWordNSRanges() -> [(wordIndex: Int, range: NSRange)] {
-        let text = sentence.text
-        var ranges: [(wordIndex: Int, range: NSRange)] = []
-        
-        for (wordIndex, range) in sentence.wordRanges {
-            guard explainableWordIndices.contains(wordIndex) else { continue }
-            guard range.lowerBound >= text.startIndex,
-                  range.upperBound <= text.endIndex,
-                  range.lowerBound < range.upperBound else { continue }
-            
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let length = text.distance(from: range.lowerBound, to: range.upperBound)
-            let nsRange = NSRange(location: startOffset, length: length)
-            
-            ranges.append((wordIndex: wordIndex, range: nsRange))
-        }
-        
-        return ranges
-    }
-    
-    // Apply continuous highlight background (includes punctuation, text turns black)
-    // Returns the highlight ranges for punctuation checking
-    private func applyContinuousHighlight(to attributed: inout AttributedString, text: String, sortedRanges: [(wordIndex: Int, range: Range<String.Index>)]) -> [Range<Int>] {
-        guard let lastSpoken = lastSpokenWordIndex else { return [] }
-        
-        // Find all words that should be highlighted (current word + all spoken words)
-        var wordsToHighlight: [(wordIndex: Int, range: Range<String.Index>)] = []
-        for (wordIndex, range) in sortedRanges {
-            if wordIndex == currentWordIndex || wordIndex <= lastSpoken {
-                wordsToHighlight.append((wordIndex, range))
-            }
-        }
-        
-        guard !wordsToHighlight.isEmpty else { return [] }
-        
-        // Group consecutive words (no line breaks between them) into continuous ranges
-        // Include punctuation and spaces between words, AND leading punctuation before first word
-        var continuousRanges: [Range<Int>] = []
-        var currentStart: Int? = nil
-        var currentEnd: Int? = nil
-        
-        // Check if first word has leading punctuation to include
-        let firstWordRange = wordsToHighlight.first!.range
-        let firstWordStartOffset = text.distance(from: text.startIndex, to: firstWordRange.lowerBound)
-        
-        // Look backward from first word to include leading punctuation and spaces
-        var extendedStart = firstWordStartOffset
-        if firstWordStartOffset > 0 {
-            // Check if there's a line break before the first word
-            let textBefore = String(text[text.startIndex..<firstWordRange.lowerBound])
-            let hasLineBreakBefore = textBefore.contains("\n") || textBefore.contains("\r")
-            
-            if !hasLineBreakBefore {
-                // No line break - include everything from the start of the sentence
-                // This includes leading punctuation like " , at the start
-                extendedStart = 0
-            }
-            // If there's a line break, keep extendedStart at firstWordStartOffset (don't include previous line)
-        }
-        
-        for (index, (wordIndex, range)) in wordsToHighlight.enumerated() {
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-            
-            // For the first word, use the extended start that includes leading punctuation
-            let actualStartOffset = (index == 0) ? extendedStart : startOffset
-            
-            // Check if there's a line break before this word
-            let textBefore = String(text[text.startIndex..<range.lowerBound])
-            let hasLineBreakBefore = textBefore.contains("\n") || textBefore.contains("\r")
-            
-            // CRITICAL FIX: Check if this word is consecutive with the previous word in the word map
-            // If there's a gap in word indices, they should be separate highlights even if adjacent in text
-            // This handles hyphenated words like "self-improvement" where "self" and "improvement" are separate words
-            let isConsecutiveWord = index > 0 ? {
-                let prevWordIndex = wordsToHighlight[index - 1].wordIndex
-                // Words are consecutive if their indices are sequential (difference of 1)
-                return wordIndex == prevWordIndex + 1
-            }() : true
-            
-            // Find the next word or end of sentence to include punctuation
-            var extendedEnd = endOffset
-            if endOffset < text.count {
-                // Look ahead to include punctuation and spaces until next word or line break
-                let remainingText = String(text[text.index(text.startIndex, offsetBy: endOffset)...])
                 
-                // Check if the next word in sortedRanges is the next consecutive word in our highlight list
-                // If not, we should stop at the hyphen/punctuation (don't include the next word)
-                let nextWordInHighlight = index + 1 < wordsToHighlight.count ? wordsToHighlight[index + 1] : nil
-                let isNextWordConsecutive = nextWordInHighlight != nil ? {
-                    return nextWordInHighlight!.wordIndex == wordIndex + 1
-                }() : false
-                
-                if let nextWordStart = sortedRanges.first(where: { wordRange in
-                    let wordStart = text.distance(from: text.startIndex, to: wordRange.range.lowerBound)
-                    return wordStart > endOffset
-                }) {
-                    let nextStart = text.distance(from: text.startIndex, to: nextWordStart.range.lowerBound)
+                // Apply styling for explainable words - make them stand out subtly
+                if explainableWordIndices.contains(wordIndex) {
+                    // Thick light blue underline for explainable words
+                    result.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: nsRange)
+                    let lightBlue = UIColor(Color(red: 100/255, green: 180/255, blue: 255/255)) // Brighter blue
+                    result.addAttribute(.underlineColor, value: lightBlue, range: nsRange)
                     
-                    // If the next word is NOT consecutive in the word map, only include up to punctuation (hyphen)
-                    // This keeps the hyphen with the first word but starts a new range for the second word
-                    if !isNextWordConsecutive {
-                        // Only include punctuation (like hyphen) but stop before the next word
-                        // Find the first non-punctuation/non-space character (the start of next word)
-                        // Note: textAfter is calculated but not used - kept for potential future debugging
-                        let _ = String(text[text.index(text.startIndex, offsetBy: endOffset)..<text.index(text.startIndex, offsetBy: nextStart)])
-                        // Include all punctuation and spaces, but stop at the word boundary
-                        extendedEnd = nextStart
-                    } else {
-                        // Next word is consecutive - include everything up to (but not including) the next word
-                        extendedEnd = nextStart
+                    // Make explainable words slightly brighter to draw attention (even when read)
+                    if wordIndex != currentWordIndex {
+                        if let lastSpoken = lastSpokenWordIndex, wordIndex <= lastSpoken {
+                            // Already read - keep full brightness, underline does the work
+                        } else {
+                            // Unread - make brighter than normal unread words (0.75 vs 0.5)
+                            let brighterColor = UIColor(themeColors.text.opacity(0.75))
+                            result.addAttribute(.foregroundColor, value: brighterColor, range: nsRange)
+                        }
                     }
-                } else {
-                    // No more words, include to end of sentence
-                    extendedEnd = text.count
+                }
+            }
+            
+            // Apply highlight background if enabled
+            // HORIZONTAL: Words on same line connected (including spaces between)
+            // VERTICAL: Each line separate (highlight stops at line breaks)
+            // CRITICAL: Must match logic in applyContinuousHighlight() to prevent vertical bleeding
+            var highlightedNSRanges: [NSRange] = []  // Track highlighted ranges for punctuation styling
+            if highlightColor != .none, let lastSpoken = lastSpokenWordIndex {
+                // Find all words that should be highlighted (with their indices for consecutive checking)
+                let wordsToHighlight = sortedRanges
+                    .filter { wordIndex, _ in wordIndex == currentWordIndex || wordIndex <= lastSpoken }
+                
+                if !wordsToHighlight.isEmpty {
+                    // Group consecutive words into continuous ranges
+                    // CRITICAL: Check for line breaks AND non-consecutive word indices
+                    var continuousRanges: [(start: Int, end: Int)] = []
+                    var currentStart: Int? = nil
+                    var currentEnd: Int? = nil
+                    var prevWordIndex: Int? = nil
+                    
+                    for (index, (wordIndex, range)) in wordsToHighlight.enumerated() {
+                        let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                        let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                        
+                        // Check if there's a line break before this word
+                        let hasLineBreakBefore: Bool = {
+                            if index == 0 { return false }
+                            let prevRange = wordsToHighlight[index - 1].range
+                            // SAFETY: Guard against overlapping word ranges to prevent crash
+                            guard prevRange.upperBound <= range.lowerBound else {
+                                return true  // Treat overlapping ranges as separate highlights
+                            }
+                            let textBetween = String(text[prevRange.upperBound..<range.lowerBound])
+                            return textBetween.contains("\n") || textBetween.contains("\r")
+                        }()
+                        
+                        // Check if this word is consecutive with the previous word in word indices
+                        let isConsecutiveWord: Bool = {
+                            guard let prev = prevWordIndex else { return true }
+                            return wordIndex == prev + 1
+                        }()
+                        
+                        // Determine if we should continue the current range or start a new one
+                        let shouldContinue: Bool = {
+                            guard let prevEnd = currentEnd else { return false }
+                            // Don't continue if there's a line break
+                            if hasLineBreakBefore { return false }
+                            // Don't continue if words aren't consecutive (handles hyphenated words)
+                            if !isConsecutiveWord { return false }
+                            // Don't continue if gap is too large
+                            let gap = startOffset - prevEnd
+                            return gap <= 3
+                        }()
+                        
+                        if shouldContinue {
+                            // Extend current range
+                            currentEnd = endOffset
+                        } else {
+                            // Save previous range and start new one
+                            if let start = currentStart, let end = currentEnd {
+                                continuousRanges.append((start: start, end: end))
+                            }
+                            currentStart = startOffset
+                            currentEnd = endOffset
+                        }
+                        
+                        prevWordIndex = wordIndex
+                    }
+                    
+                    // Add final range
+                    if let start = currentStart, let end = currentEnd {
+                        continuousRanges.append((start: start, end: end))
+                    }
+                    
+                    // Extend each range to include adjacent punctuation (but not spaces or across lines)
+                    var finalRanges: [(start: Int, end: Int)] = []
+                    for range in continuousRanges {
+                        var startOffset = range.start
+                        var endOffset = range.end
+                        
+                        // Scan backward to include leading punctuation ONLY (quotes, etc.)
+                        // Stop at whitespace or line breaks
+                        while startOffset > 0 {
+                            let charIndex = text.index(text.startIndex, offsetBy: startOffset - 1)
+                            let char = text[charIndex]
+                            if char.isPunctuation && !char.isWhitespace && char != "\n" && char != "\r" {
+                                startOffset -= 1
+                            } else {
+                                break
+                            }
+                        }
+                        
+                        // Scan forward to include trailing punctuation ONLY
+                        // Stop at whitespace or line breaks
+                        while endOffset < text.count {
+                            let charIndex = text.index(text.startIndex, offsetBy: endOffset)
+                            let char = text[charIndex]
+                            if char.isPunctuation && !char.isWhitespace && char != "\n" && char != "\r" {
+                                endOffset += 1
+                            } else {
+                                break
+                            }
+                        }
+                        
+                        finalRanges.append((start: startOffset, end: endOffset))
+                    }
+                    
+                    // Apply background to each range
+                    // Use TextKit 2 to split ranges at visual line boundaries to prevent vertical bleeding
+                    // This matches how UITextView renders text (TextKit 2 by default on iOS 16+)
+                    let effectiveWidth = containerWidth > 0 ? containerWidth : UIScreen.main.bounds.width - 40
+                    
+                    // Create TextKit 2 layout infrastructure
+                    let textContentStorage = NSTextContentStorage()
+                    textContentStorage.attributedString = result
+                    
+                    let textLayoutManager = NSTextLayoutManager()
+                    textContentStorage.addTextLayoutManager(textLayoutManager)
+                    
+                    let textContainer = NSTextContainer(size: CGSize(width: effectiveWidth, height: .greatestFiniteMagnitude))
+                    textContainer.lineFragmentPadding = 0
+                    textLayoutManager.textContainer = textContainer
+                    
+                    // Force layout calculation
+                    textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+                    
+                    // Collect all line break positions using TextKit 2
+                    var lineBreakPositions: [Int] = []
+                    textLayoutManager.enumerateTextLayoutFragments(
+                        from: textContentStorage.documentRange.location,
+                        options: [.ensuresLayout]
+                    ) { fragment in
+                        for lineFragment in fragment.textLineFragments {
+                            let lineRange = lineFragment.characterRange
+                            if let elementRange = fragment.textElement?.elementRange,
+                               let startLocation = elementRange.location as? NSTextLocation {
+                                let documentOffset = textContentStorage.offset(
+                                    from: textContentStorage.documentRange.location,
+                                    to: startLocation
+                                )
+                                let lineEnd = documentOffset + lineRange.location + lineRange.length
+                                lineBreakPositions.append(lineEnd)
+                            }
+                        }
+                        return true
+                    }
+                    
+                    // Apply highlights split at line boundaries
+                    for range in finalRanges {
+                        var currentPos = range.start
+                        let rangeEnd = range.end
+                        
+                        while currentPos < rangeEnd {
+                            // Find the next line break after currentPos
+                            var segmentEnd = rangeEnd
+                            for lineBreak in lineBreakPositions {
+                                if lineBreak > currentPos && lineBreak < segmentEnd {
+                                    segmentEnd = lineBreak
+                                    break
+                                }
+                            }
+                            
+                            let segmentLength = segmentEnd - currentPos
+                            if segmentLength > 0 {
+                                let segmentRange = NSRange(location: currentPos, length: segmentLength)
+                                result.addAttribute(.backgroundColor, value: UIColor(highlightColor.color), range: segmentRange)
+                                result.addAttribute(.foregroundColor, value: UIColor.black, range: segmentRange)
+                                highlightedNSRanges.append(segmentRange)
+                            }
+                            
+                            currentPos = segmentEnd
+                        }
+                    }
                 }
                 
-                // Stop at line breaks
-                if let lineBreakIndex = remainingText.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
-                    let lineBreakOffsetInRemaining = remainingText.distance(from: remainingText.startIndex, to: lineBreakIndex)
-                    let lineBreakOffset = endOffset + lineBreakOffsetInRemaining
-                    extendedEnd = min(extendedEnd, lineBreakOffset)
+                // Change underline to yellow for explainable words that are highlighted
+                // This ensures they remain visible on any highlight color
+                for (wordIndex, range) in sortedRanges {
+                    if explainableWordIndices.contains(wordIndex) {
+                        let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                        let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                        
+                        // Check if this word is within a highlighted range
+                        let isHighlighted = highlightedNSRanges.contains { highlightRange in
+                            let wordStart = startOffset
+                            let wordEnd = endOffset
+                            let highlightStart = highlightRange.location
+                            let highlightEnd = highlightRange.location + highlightRange.length
+                            return wordStart < highlightEnd && wordEnd > highlightStart
+                        }
+                        
+                        if isHighlighted {
+                            // Change to yellow thick underline only when highlight is BLUE (for contrast)
+                            // Otherwise keep the blue underline for other highlight colors
+                            let nsRange = NSRange(location: startOffset, length: endOffset - startOffset)
+                            if highlightColor == .blue {
+                                let yellow = UIColor(Color(red: 255/255, green: 200/255, blue: 0/255)) // Bright yellow
+                                result.addAttribute(.underlineColor, value: yellow, range: nsRange)
+                            }
+                            // For other colors, keep the light blue underline
+                        }
+                    }
                 }
             }
             
-            // MODIFIED: Only continue range if words are consecutive in word map AND no line break
-            // This prevents grouping separate words that happen to be adjacent in text (like hyphenated words)
-            // The hyphen will still be included with the first word (via extendedEnd), but the second word starts a new range
-            if let prevEnd = currentEnd, !hasLineBreakBefore, isConsecutiveWord, actualStartOffset <= prevEnd {
-                // Continue current range (include spaces and punctuation between words)
-                currentEnd = max(currentEnd ?? actualStartOffset, extendedEnd)
-            } else {
-                // Start new range (words are separate or have line break)
-                if let start = currentStart, let end = currentEnd {
-                    continuousRanges.append(start..<end)
+            // Apply search match highlighting
+            for (matchIndex, matchRange) in searchMatches.enumerated() {
+                let startOffset = text.distance(from: text.startIndex, to: matchRange.lowerBound)
+                let length = text.distance(from: matchRange.lowerBound, to: matchRange.upperBound)
+                let nsRange = NSRange(location: startOffset, length: length)
+                
+                // Check if this is the currently selected search match by index
+                let isCurrentMatch = currentSearchMatchIndex == matchIndex
+                
+                if isCurrentMatch {
+                    // Green/teal background for current selected match - stands out from others
+                    result.addAttribute(.backgroundColor, value: UIColor(Color.green.opacity(0.6)), range: nsRange)
+                } else {
+                    // Orange background for other search matches
+                    result.addAttribute(.backgroundColor, value: UIColor(Color.orange.opacity(0.4)), range: nsRange)
                 }
-                currentStart = actualStartOffset
-                currentEnd = extendedEnd
-            }
-        }
-        
-        // Add final range
-        if let start = currentStart, let end = currentEnd {
-            continuousRanges.append(start..<end)
-        }
-        
-        // Apply highlight background to continuous ranges and make text black
-        for range in continuousRanges {
-            guard range.lowerBound >= 0 && range.upperBound <= text.count,
-                  let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: range.lowerBound, limitedBy: attributed.characters.endIndex),
-                  let attrEnd = attributed.characters.index(attrStart, offsetBy: range.upperBound - range.lowerBound, limitedBy: attributed.characters.endIndex) else {
-                continue
+                result.addAttribute(.foregroundColor, value: UIColor.black, range: nsRange)
             }
             
-            let attrRange = attrStart..<attrEnd
-            // Convert SwiftUI Color to UIColor for AttributedString
-            if highlightColor != .none {
-                attributed[attrRange].backgroundColor = UIColor(highlightColor.color)
-                // Make text black inside highlights for visibility
-                attributed[attrRange].foregroundColor = .black
+            // Style punctuation (simplified - follow preceding word, respect highlights)
+            var coveredRanges: [Range<Int>] = []
+            for (_, range) in sortedRanges {
+                let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                coveredRanges.append(startOffset..<endOffset)
             }
+            
+            for (index, _) in text.enumerated() {
+                let isCovered = coveredRanges.contains { $0.contains(index) }
+                if !isCovered {
+                    let nsRange = NSRange(location: index, length: 1)
+                    
+                    // Check if this character is within a highlighted range
+                    let isInHighlight = highlightedNSRanges.contains { nsRange in
+                        index >= nsRange.location && index < nsRange.location + nsRange.length
+                    }
+                    
+                    // If in highlight, color is already black - skip
+                    if isInHighlight {
+                        continue
+                    }
+                    
+                    // Find word before this position
+                    let wordBefore = sortedRanges.last { wordRange in
+                        let wordEnd = text.distance(from: text.startIndex, to: wordRange.range.upperBound)
+                        return wordEnd <= index
+                    }
+                    
+                    let color: UIColor
+                    if let wordBefore = wordBefore,
+                       let lastSpoken = lastSpokenWordIndex,
+                       wordBefore.wordIndex <= lastSpoken {
+                        color = UIColor(themeColors.text)
+                    } else {
+                        color = UIColor(themeColors.text.opacity(0.5))
+                    }
+                    result.addAttribute(.foregroundColor, value: color, range: nsRange)
+                }
+            }
+            
+            return result
         }
         
-        return continuousRanges
+        /// Build NSRange array for explainable words (used by TappableTextView for hit testing)
+        private func buildExplainableWordNSRanges() -> [(wordIndex: Int, range: NSRange)] {
+            let text = sentence.text
+            var ranges: [(wordIndex: Int, range: NSRange)] = []
+            
+            for (wordIndex, range) in sentence.wordRanges {
+                guard explainableWordIndices.contains(wordIndex) else { continue }
+                guard range.lowerBound >= text.startIndex,
+                      range.upperBound <= text.endIndex,
+                      range.lowerBound < range.upperBound else { continue }
+                
+                let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let length = text.distance(from: range.lowerBound, to: range.upperBound)
+                let nsRange = NSRange(location: startOffset, length: length)
+                
+                ranges.append((wordIndex: wordIndex, range: nsRange))
+            }
+            
+            return ranges
+        }
+        
+        // Apply continuous highlight background (includes punctuation, text turns black)
+        // Returns the highlight ranges for punctuation checking
+        private func applyContinuousHighlight(to attributed: inout AttributedString, text: String, sortedRanges: [(wordIndex: Int, range: Range<String.Index>)]) -> [Range<Int>] {
+            guard let lastSpoken = lastSpokenWordIndex else { return [] }
+            
+            // Find all words that should be highlighted (current word + all spoken words)
+            var wordsToHighlight: [(wordIndex: Int, range: Range<String.Index>)] = []
+            for (wordIndex, range) in sortedRanges {
+                if wordIndex == currentWordIndex || wordIndex <= lastSpoken {
+                    wordsToHighlight.append((wordIndex, range))
+                }
+            }
+            
+            guard !wordsToHighlight.isEmpty else { return [] }
+            
+            // Group consecutive words (no line breaks between them) into continuous ranges
+            // Include punctuation and spaces between words, AND leading punctuation before first word
+            var continuousRanges: [Range<Int>] = []
+            var currentStart: Int? = nil
+            var currentEnd: Int? = nil
+            
+            // Check if first word has leading punctuation to include
+            let firstWordRange = wordsToHighlight.first!.range
+            let firstWordStartOffset = text.distance(from: text.startIndex, to: firstWordRange.lowerBound)
+            
+            // Look backward from first word to include leading punctuation and spaces
+            var extendedStart = firstWordStartOffset
+            if firstWordStartOffset > 0 {
+                // Check if there's a line break before the first word
+                let textBefore = String(text[text.startIndex..<firstWordRange.lowerBound])
+                let hasLineBreakBefore = textBefore.contains("\n") || textBefore.contains("\r")
+                
+                if !hasLineBreakBefore {
+                    // No line break - include everything from the start of the sentence
+                    // This includes leading punctuation like " , at the start
+                    extendedStart = 0
+                }
+                // If there's a line break, keep extendedStart at firstWordStartOffset (don't include previous line)
+            }
+            
+            for (index, (wordIndex, range)) in wordsToHighlight.enumerated() {
+                let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+                let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+                
+                // For the first word, use the extended start that includes leading punctuation
+                let actualStartOffset = (index == 0) ? extendedStart : startOffset
+                
+                // Check if there's a line break before this word
+                let textBefore = String(text[text.startIndex..<range.lowerBound])
+                let hasLineBreakBefore = textBefore.contains("\n") || textBefore.contains("\r")
+                
+                // CRITICAL FIX: Check if this word is consecutive with the previous word in the word map
+                // If there's a gap in word indices, they should be separate highlights even if adjacent in text
+                // This handles hyphenated words like "self-improvement" where "self" and "improvement" are separate words
+                let isConsecutiveWord = index > 0 ? {
+                    let prevWordIndex = wordsToHighlight[index - 1].wordIndex
+                    // Words are consecutive if their indices are sequential (difference of 1)
+                    return wordIndex == prevWordIndex + 1
+                }() : true
+                
+                // Find the next word or end of sentence to include punctuation
+                var extendedEnd = endOffset
+                if endOffset < text.count {
+                    // Look ahead to include punctuation and spaces until next word or line break
+                    let remainingText = String(text[text.index(text.startIndex, offsetBy: endOffset)...])
+                    
+                    // Check if the next word in sortedRanges is the next consecutive word in our highlight list
+                    // If not, we should stop at the hyphen/punctuation (don't include the next word)
+                    let nextWordInHighlight = index + 1 < wordsToHighlight.count ? wordsToHighlight[index + 1] : nil
+                    let isNextWordConsecutive = nextWordInHighlight != nil ? {
+                        return nextWordInHighlight!.wordIndex == wordIndex + 1
+                    }() : false
+                    
+                    if let nextWordStart = sortedRanges.first(where: { wordRange in
+                        let wordStart = text.distance(from: text.startIndex, to: wordRange.range.lowerBound)
+                        return wordStart > endOffset
+                    }) {
+                        let nextStart = text.distance(from: text.startIndex, to: nextWordStart.range.lowerBound)
+                        
+                        // If the next word is NOT consecutive in the word map, only include up to punctuation (hyphen)
+                        // This keeps the hyphen with the first word but starts a new range for the second word
+                        if !isNextWordConsecutive {
+                            // Only include punctuation (like hyphen) but stop before the next word
+                            // Find the first non-punctuation/non-space character (the start of next word)
+                            // Note: textAfter is calculated but not used - kept for potential future debugging
+                            let _ = String(text[text.index(text.startIndex, offsetBy: endOffset)..<text.index(text.startIndex, offsetBy: nextStart)])
+                            // Include all punctuation and spaces, but stop at the word boundary
+                            extendedEnd = nextStart
+                        } else {
+                            // Next word is consecutive - include everything up to (but not including) the next word
+                            extendedEnd = nextStart
+                        }
+                    } else {
+                        // No more words, include to end of sentence
+                        extendedEnd = text.count
+                    }
+                    
+                    // Stop at line breaks
+                    if let lineBreakIndex = remainingText.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
+                        let lineBreakOffsetInRemaining = remainingText.distance(from: remainingText.startIndex, to: lineBreakIndex)
+                        let lineBreakOffset = endOffset + lineBreakOffsetInRemaining
+                        extendedEnd = min(extendedEnd, lineBreakOffset)
+                    }
+                }
+                
+                // MODIFIED: Only continue range if words are consecutive in word map AND no line break
+                // This prevents grouping separate words that happen to be adjacent in text (like hyphenated words)
+                // The hyphen will still be included with the first word (via extendedEnd), but the second word starts a new range
+                if let prevEnd = currentEnd, !hasLineBreakBefore, isConsecutiveWord, actualStartOffset <= prevEnd {
+                    // Continue current range (include spaces and punctuation between words)
+                    currentEnd = max(currentEnd ?? actualStartOffset, extendedEnd)
+                } else {
+                    // Start new range (words are separate or have line break)
+                    if let start = currentStart, let end = currentEnd {
+                        continuousRanges.append(start..<end)
+                    }
+                    currentStart = actualStartOffset
+                    currentEnd = extendedEnd
+                }
+            }
+            
+            // Add final range
+            if let start = currentStart, let end = currentEnd {
+                continuousRanges.append(start..<end)
+            }
+            
+            // Apply highlight background to continuous ranges and make text black
+            for range in continuousRanges {
+                guard range.lowerBound >= 0 && range.upperBound <= text.count,
+                      let attrStart = attributed.characters.index(attributed.characters.startIndex, offsetBy: range.lowerBound, limitedBy: attributed.characters.endIndex),
+                      let attrEnd = attributed.characters.index(attrStart, offsetBy: range.upperBound - range.lowerBound, limitedBy: attributed.characters.endIndex) else {
+                    continue
+                }
+                
+                let attrRange = attrStart..<attrEnd
+                // Convert SwiftUI Color to UIColor for AttributedString
+                if highlightColor != .none {
+                    attributed[attrRange].backgroundColor = UIColor(highlightColor.color)
+                    // Make text black inside highlights for visibility
+                    attributed[attrRange].foregroundColor = .black
+                }
+            }
+            
+            return continuousRanges
+        }
+        
     }
     
+    // MARK: - Word Segment Model
+    struct WordSegment: Identifiable {
+        let id: String
+        let text: String
+        let color: Color
+    }
 }
-
-// MARK: - Word Segment Model
-struct WordSegment: Identifiable {
-    let id: String
-    let text: String
-    let color: Color
-}
-
 // MARK: - Equatable Conformance for Performance
-extension OptimizedSentenceView: Equatable {
-    static func == (lhs: OptimizedSentenceView, rhs: OptimizedSentenceView) -> Bool {
+extension OptimizedReaderView.OptimizedSentenceView: Equatable {
+    static func == (lhs: OptimizedReaderView.OptimizedSentenceView, rhs: OptimizedReaderView.OptimizedSentenceView) -> Bool {
         // PERFORMANCE: Only compare *sentence-local* word indices so unrelated sentences
         // don't re-render on every global word boundary.
         func sentenceMinMax(_ sentence: PrecomputedSentence) -> (min: Int, max: Int)? {
@@ -3979,7 +4528,7 @@ extension OptimizedSentenceView: Equatable {
             if idx < mm.min { return nil }
             return min(idx, mm.max)
         }
-
+        
         // Marker positioning only matters for the *current* sentence (it is not rendered for others).
         // Include it in equality so Back-to-Sync / long-sentence jumps can move the marker even when
         // playback is paused (i.e., currentWordIndex may not be changing).
@@ -3998,710 +4547,1596 @@ extension OptimizedSentenceView: Equatable {
         // 7. Same explainable word indices (for highlighting)
         // 8. Same search matches (for search highlighting)
         // This allows SwiftUI to skip re-rendering sentences that haven't actually changed
-        return lhs.sentence.id == rhs.sentence.id &&
-               lhs.sentenceIndex == rhs.sentenceIndex &&
-               lhs.currentSentenceIndex == rhs.currentSentenceIndex &&
-               effectiveCurrent(lhs.currentWordIndex, sentence: lhs.sentence) == effectiveCurrent(rhs.currentWordIndex, sentence: rhs.sentence) &&
-               effectiveLastSpoken(lhs.lastSpokenWordIndex, sentence: lhs.sentence) == effectiveLastSpoken(rhs.lastSpokenWordIndex, sentence: rhs.sentence) &&
-               lhs.textSize == rhs.textSize &&
-               lhs.highlightColor == rhs.highlightColor &&
-               lhs.isBookmarked == rhs.isBookmarked &&
-               lhs.explainableWordIndices == rhs.explainableWordIndices &&
-               lhs.searchMatches.count == rhs.searchMatches.count &&
-               lhs.containerWidth == rhs.containerWidth &&
-               markerPositionIsEqual
+        let a = lhs.sentence.id == rhs.sentence.id
+             && lhs.sentenceIndex == rhs.sentenceIndex
+             && lhs.currentSentenceIndex == rhs.currentSentenceIndex
+
+        let b = effectiveCurrent(lhs.currentWordIndex, sentence: lhs.sentence)
+             == effectiveCurrent(rhs.currentWordIndex, sentence: rhs.sentence)
+             && effectiveLastSpoken(lhs.lastSpokenWordIndex, sentence: lhs.sentence)
+             == effectiveLastSpoken(rhs.lastSpokenWordIndex, sentence: rhs.sentence)
+
+        let c = lhs.textSize == rhs.textSize
+             && lhs.readerFont == rhs.readerFont
+             && lhs.highlightColor == rhs.highlightColor
+             && lhs.isBookmarked == rhs.isBookmarked
+             && lhs.hasNote == rhs.hasNote
+
+        let d = lhs.explainableWordIndices == rhs.explainableWordIndices
+             && lhs.searchMatches.count == rhs.searchMatches.count
+             && lhs.currentSearchMatchIndex == rhs.currentSearchMatchIndex
+             && lhs.containerWidth == rhs.containerWidth
+
+        let e = markerPositionIsEqual
+             && lhs.themeColors.text.description == rhs.themeColors.text.description
+             && lhs.themeColors.background.description == rhs.themeColors.background.description
+
+        return a && b && c && d && e
     }
 }
-
-// MARK: - Optimized Audio Player (Singleton for Background Playback)
-class OptimizedAudioPlayer: ObservableObject {
-    // SINGLETON: Player must persist beyond view lifecycle for background playback
-    static let shared = OptimizedAudioPlayer()
     
-    @Published var isPlaying = false
-    @Published var duration: Double = 0
-    @Published var isLoading = false
-    @Published var playbackSpeed: Double = 1.0
-    
-    // PERFORMANCE: Separate internal time tracking from UI updates
-    // currentTime is accessed frequently by reader view (60fps) but should NOT trigger UI updates elsewhere
-    private(set) var currentTime: Double = 0  // Internal, high-frequency tracking (not @Published)
-    private(set) var displayTime: Double = 0  // UI-friendly, throttled (not @Published to prevent mini player flashing)
-    
-    // Mini Player metadata (exposed for external access)
-    @Published private(set) var chapterTitle: String = ""
-    @Published private(set) var bookTitle: String = ""
-    @Published private(set) var coverURL: URL?
-    @Published private(set) var bookId: String = ""
-    @Published private(set) var chapterNumber: Int = 1
-    
-    // OPTIMIZATION: Store preloaded data for instant reader re-entry
-    // When user returns to a book that's already playing, skip loading entirely
-    private(set) var preloadedData: PreloadedReaderData?
-    
-    // MARK: - Last Played Session Persistence
-    private let lastPlayedKey = "lastPlayedSession"
-    
-    /// Returns true if audio is actively playing (player exists and loaded)
-    var hasActiveSession: Bool {
-        return player != nil && !chapterTitle.isEmpty && duration > 0
-    }
-    
-    /// Returns true if we have displayable session info (either active OR last-played)
-    /// Use this for showing the mini player UI
-    var hasDisplayableSession: Bool {
-        return !chapterTitle.isEmpty && !bookTitle.isEmpty
-    }
-    
-    /// Check if we have valid preloaded data for a specific book/chapter
-    func hasPreloadedData(for bookId: String, chapterNumber: Int) -> Bool {
-        guard let data = preloadedData else { return false }
-        return data.book.id == bookId && (data.chapter.order + 1) == chapterNumber
-    }
-    
-    /// Store preloaded data for later re-use
-    func setPreloadedData(_ data: PreloadedReaderData) {
-        self.preloadedData = data
-    }
-    
-    /// Clear preloaded data (e.g., when loading a different book)
-    func clearPreloadedData() {
-        self.preloadedData = nil
-    }
-    
-    var onTimeUpdate: ((Double, Double) -> Void)?
-
-    // Now Playing metadata and state (internal)
-    private var nowPlayingActivated = false
-
-    private var player: AVPlayer?
-    private var timeObserver: Any?
-    private weak var timeObserverPlayer: AVPlayer? // Track which player the observer was added to
-    private var durationObserver: NSKeyValueObservation?
-    private var timeControlStatusObserver: NSKeyValueObservation?
-    private var playbackEndObserver: NSObjectProtocol?
-    private var playbackErrorObserver: NSObjectProtocol?
-    
-    // Progress bar updates (throttled for performance)
-    // Word sync is now handled by CADisplayLink at 60fps in reader view
-    // UI updates (mini player, etc.) throttled to 1fps to prevent app-wide lag
-    private let progressUpdateInterval: Double = 1.0 // 1 second for UI updates
-    private var lastDisplayTimeUpdate: Double = 0
-    
-    private init() {
-        // Load last played session on init
-        loadLastPlayedSession()
-    }
-    
-    // MARK: - Last Played Session Storage
-    
-    /// Save current session info to UserDefaults for display on next launch
-    func saveLastPlayedSession() {
-        guard !bookId.isEmpty, !chapterTitle.isEmpty else { return }
-        let sessionData: [String: Any] = [
-            "bookId": bookId,
-            "bookTitle": bookTitle,
-            "chapterTitle": chapterTitle,
-            "chapterNumber": chapterNumber,
-            "coverURL": coverURL?.absoluteString ?? "",
-            "currentTime": currentTime,
-            "duration": duration
-        ]
-        UserDefaults.standard.set(sessionData, forKey: lastPlayedKey)
-    }
-    
-    /// Load last played session from UserDefaults
-    private func loadLastPlayedSession() {
-        guard let sessionData = UserDefaults.standard.dictionary(forKey: lastPlayedKey) else { return }
+    // MARK: - Optimized Audio Player (Singleton for Background Playback)
+    class OptimizedAudioPlayer: ObservableObject {
+        // SINGLETON: Player must persist beyond view lifecycle for background playback
+        static let shared = OptimizedAudioPlayer()
         
-        bookId = sessionData["bookId"] as? String ?? ""
-        bookTitle = sessionData["bookTitle"] as? String ?? ""
-        chapterTitle = sessionData["chapterTitle"] as? String ?? ""
-        chapterNumber = sessionData["chapterNumber"] as? Int ?? 1
-        currentTime = sessionData["currentTime"] as? Double ?? 0
-        displayTime = currentTime  // Sync display time
-        duration = sessionData["duration"] as? Double ?? 0
+        @Published var isPlaying = false
+        @Published var duration: Double = 0
+        @Published var isLoading = false
+        @Published var didReachEnd: Bool = false
+        @Published var playbackSpeed: Double = 1.0
         
-        if let urlString = sessionData["coverURL"] as? String, !urlString.isEmpty {
-            coverURL = URL(string: urlString)
+        // PERFORMANCE: Separate internal time tracking from UI updates
+        private(set) var currentTime: Double = 0
+        private(set) var displayTime: Double = 0
+        
+        // Mini Player metadata
+        @Published private(set) var chapterTitle: String = ""
+        @Published private(set) var bookTitle: String = ""
+        @Published private(set) var coverURL: URL?
+        @Published private(set) var bookId: String = ""
+        @Published private(set) var chapterNumber: Int = 1
+        
+        // OPTIMIZATION: Store preloaded data for instant reader re-entry
+        private(set) var preloadedData: PreloadedReaderData?
+        
+        private let lastPlayedKey = "lastPlayedSession"
+        
+        var hasActiveSession: Bool {
+            return player != nil && !chapterTitle.isEmpty && duration > 0
         }
-    }
-    
-    /// Clear last played session (e.g., on logout)
-    func clearLastPlayedSession() {
-        UserDefaults.standard.removeObject(forKey: lastPlayedKey)
-        bookId = ""
-        bookTitle = ""
-        chapterTitle = ""
-        chapterNumber = 1
-        coverURL = nil
-        currentTime = 0
-        displayTime = 0
-        duration = 0
-    }
-
-    // MARK: - Now Playing Management
-
-    private func activateNowPlayingIfNeeded() {
-        guard !nowPlayingActivated, !chapterTitle.isEmpty else { return }
-
-        NowPlayingController.shared.activateSession(
-            chapterTitle: chapterTitle,
-            bookTitle: bookTitle,
-            coverURL: coverURL,
-            duration: duration,
-            play: { [weak self] in self?.play() },
-            pause: { [weak self] in self?.pause() },
-            seek: { [weak self] in self?.seek(to: $0) },
-            currentTime: { [weak self] in self?.currentTime ?? 0 },
-            isPlaying: { [weak self] in self?.isPlaying ?? false }
-        )
-        nowPlayingActivated = true
-    }
-
-    private func deactivateNowPlaying() {
-        if nowPlayingActivated {
-            NowPlayingController.shared.deactivateSession()
-            nowPlayingActivated = false
+        
+        var hasDisplayableSession: Bool {
+            return !chapterTitle.isEmpty && !bookTitle.isEmpty
         }
-    }
-
-    private func updateNowPlayingMetadata(force: Bool = false) {
-        guard nowPlayingActivated else { return }
-        NowPlayingController.shared.updatePlaybackState(
-            elapsedTime: currentTime,
-            isPlaying: isPlaying,
-            force: force
-        )
-    }
-
-    // OPTIMIZATION: Support loading from preloaded asset
-    func load(asset: AVURLAsset, preloadedDuration: Double? = nil,
-              chapterTitle: String = "", bookTitle: String = "", coverURL: URL? = nil,
-              bookId: String = "", chapterNumber: Int = 1) async {
-        // Store metadata for Mini Player and Now Playing
-        await MainActor.run {
-            self.chapterTitle = chapterTitle
-            self.bookTitle = bookTitle
-            self.coverURL = coverURL
-            self.bookId = bookId
-            self.chapterNumber = chapterNumber
-            // Save for next app launch
-            self.saveLastPlayedSession()
+        
+        func hasPreloadedData(for bookId: String, chapterNumber: Int) -> Bool {
+            guard let data = preloadedData else { return false }
+            return data.book.id == bookId && (data.chapter.order + 1) == chapterNumber
         }
-
-        // Clean up previous player before loading new content
-        await cleanupCurrentPlayer()
-
-        await MainActor.run {
-            isLoading = true
-            // Use preloaded duration if available (instant!)
-            if let preloadedDuration = preloadedDuration, preloadedDuration > 0 {
-                self.duration = preloadedDuration
+        
+        func setPreloadedData(_ data: PreloadedReaderData) {
+            self.preloadedData = data
+        }
+        
+        func clearPreloadedData() {
+            self.preloadedData = nil
+        }
+        
+        var onTimeUpdate: ((Double, Double) -> Void)?
+        var nowPlayingActivated = false
+        
+        private var player: AVPlayer?
+        private var timeObserver: Any?
+        private weak var timeObserverPlayer: AVPlayer?
+        private var durationObserver: NSKeyValueObservation?
+        private var timeControlStatusObserver: NSKeyValueObservation?
+        private var playbackEndObserver: NSObjectProtocol?
+        private var playbackErrorObserver: NSObjectProtocol?
+        
+        private let progressUpdateInterval: Double = 1.0
+        private var lastDisplayTimeUpdate: Double = 0
+        
+        private init() {
+            loadLastPlayedSession()
+        }
+        
+        // MARK: - Last Played Session Storage
+        
+        func saveLastPlayedSession() {
+            guard !bookId.isEmpty, !chapterTitle.isEmpty else { return }
+            let sessionData: [String: Any] = [
+                "bookId": bookId,
+                "bookTitle": bookTitle,
+                "chapterTitle": chapterTitle,
+                "chapterNumber": chapterNumber,
+                "coverURL": coverURL?.absoluteString ?? "",
+                "currentTime": currentTime,
+                "duration": duration
+            ]
+            UserDefaults.standard.set(sessionData, forKey: lastPlayedKey)
+        }
+        
+        private func loadLastPlayedSession() {
+            guard let sessionData = UserDefaults.standard.dictionary(forKey: lastPlayedKey) else { return }
+            bookId = sessionData["bookId"] as? String ?? ""
+            bookTitle = sessionData["bookTitle"] as? String ?? ""
+            chapterTitle = sessionData["chapterTitle"] as? String ?? ""
+            chapterNumber = sessionData["chapterNumber"] as? Int ?? 1
+            currentTime = sessionData["currentTime"] as? Double ?? 0
+            displayTime = currentTime
+            duration = sessionData["duration"] as? Double ?? 0
+            if let urlString = sessionData["coverURL"] as? String, !urlString.isEmpty {
+                coverURL = URL(string: urlString)
             }
         }
         
-        let playerItem = AVPlayerItem(asset: asset)
-        let newPlayer = AVPlayer(playerItem: playerItem)
-        // Reduce perceived "first play" latency for spoken audio.
-        // (Tradeoff: may increase risk of small stalls on poor networks.)
-        newPlayer.automaticallyWaitsToMinimizeStalling = false
-        
-        await setupPlayerObservers(player: newPlayer, playerItem: playerItem)
-
-        // Register Now Playing + remote commands during load (NOT on the play tap),
-        // so the first Play press doesn't stall the main thread/UI updates.
-        await MainActor.run { [weak self] in
-            guard let self else { return }
-            self.activateNowPlayingIfNeeded()
-            self.updateNowPlayingMetadata(force: true)
-        }
-    }
-    
-    func load(url: URL, preloadedDuration: Double? = nil,
-              chapterTitle: String = "", bookTitle: String = "", coverURL: URL? = nil,
-              bookId: String = "", chapterNumber: Int = 1) async {
-        // Store metadata for Mini Player and Now Playing
-        await MainActor.run {
-            self.chapterTitle = chapterTitle
-            self.bookTitle = bookTitle
-            self.coverURL = coverURL
-            self.bookId = bookId
-            self.chapterNumber = chapterNumber
-            // Save for next app launch
-            self.saveLastPlayedSession()
-        }
-
-        // Clean up previous player before loading new content
-        await cleanupCurrentPlayer()
-
-        await MainActor.run {
-            isLoading = true
-            // Use preloaded duration if available (instant!)
-            if let preloadedDuration = preloadedDuration, preloadedDuration > 0 {
-                self.duration = preloadedDuration
-            }
-        }
-        
-        let playerItem = AVPlayerItem(url: url)
-        let newPlayer = AVPlayer(playerItem: playerItem)
-        // Reduce perceived "first play" latency for spoken audio.
-        // (Tradeoff: may increase risk of small stalls on poor networks.)
-        newPlayer.automaticallyWaitsToMinimizeStalling = false
-        
-        await setupPlayerObservers(player: newPlayer, playerItem: playerItem)
-
-        // Register Now Playing + remote commands during load (NOT on the play tap),
-        // so the first Play press doesn't stall the main thread/UI updates.
-        await MainActor.run { [weak self] in
-            guard let self else { return }
-            self.activateNowPlayingIfNeeded()
-            self.updateNowPlayingMetadata(force: true)
-        }
-    }
-    
-    /// Clean up current player and observers (called before loading new content)
-    private func cleanupCurrentPlayer() async {
-        // Deactivate Now Playing before cleanup
-        deactivateNowPlaying()
-        await MainActor.run {
-            // Remove time observer from the player that created it
-            if let observer = timeObserver, let observerPlayer = timeObserverPlayer {
-                observerPlayer.removeTimeObserver(observer)
-                timeObserver = nil
-                timeObserverPlayer = nil
-            }
-            
-            // Remove notification observers
-            if let observer = playbackEndObserver {
-                NotificationCenter.default.removeObserver(observer)
-                playbackEndObserver = nil
-            }
-            if let observer = playbackErrorObserver {
-                NotificationCenter.default.removeObserver(observer)
-                playbackErrorObserver = nil
-            }
-            
-            // Invalidate duration observer
-            durationObserver?.invalidate()
-            durationObserver = nil
-
-            // Invalidate player state observers
-            timeControlStatusObserver?.invalidate()
-            timeControlStatusObserver = nil
-            
-            // Stop and clear player
-            player?.pause()
-            player = nil
-            
-            // Reset state
-            isPlaying = false
+        func clearLastPlayedSession() {
+            UserDefaults.standard.removeObject(forKey: lastPlayedKey)
+            bookId = ""
+            bookTitle = ""
+            chapterTitle = ""
+            chapterNumber = 1
+            coverURL = nil
             currentTime = 0
             displayTime = 0
             duration = 0
         }
-    }
-    
-    private func setupPlayerObservers(player: AVPlayer, playerItem: AVPlayerItem) async {
         
-        // Observe errors to catch playback issues
-        playbackErrorObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemFailedToPlayToEndTime,
-            object: playerItem,
-            queue: .main
-        ) { [weak self] notification in
-            if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
-                print("⚠️ OptimizedAudioPlayer: Playback error: \(error.localizedDescription)")
+        // MARK: - Now Playing Management
+        
+        private func activateNowPlayingIfNeeded() {
+            guard !nowPlayingActivated, !chapterTitle.isEmpty else { return }
+            NowPlayingController.shared.activateSession(
+                chapterTitle: chapterTitle,
+                bookTitle: bookTitle,
+                coverURL: coverURL,
+                duration: duration,
+                play: { [weak self] in self?.play() },
+                pause: { [weak self] in self?.pause() },
+                seek: { [weak self] in self?.seek(to: $0) },
+                currentTime: { [weak self] in self?.currentTime ?? 0 },
+                isPlaying: { [weak self] in self?.isPlaying ?? false }
+            )
+            nowPlayingActivated = true
+        }
+        
+        private func deactivateNowPlaying() {
+            if nowPlayingActivated {
+                NowPlayingController.shared.deactivateSession()
+                nowPlayingActivated = false
             }
         }
         
-        // Observe status for duration (fallback if not preloaded)
-        durationObserver = playerItem.observe(\.status, options: [.new]) { [weak self] item, _ in
-            if item.status == .readyToPlay {
-                DispatchQueue.main.async {
-                    // VALIDATE: Check if duration CMTime is valid before extracting seconds
-                    let durationCMTime = item.duration
-                    guard durationCMTime.isValid && durationCMTime.isNumeric else {
-                        self?.isLoading = false
-                        return
-                    }
-                    
-                    let duration = durationCMTime.seconds
-                    
-                    // VALIDATE: Only use valid duration
-                    if duration.isFinite && duration > 0 {
-                        // Only update if we don't have a preloaded duration
-                        if self?.duration == 0 || self?.duration == nil {
-                            self?.duration = duration
-                        }
-                    }
-                    self?.isLoading = false
-                    
-                    // Apply playback speed when ready (but don't auto-play)
-                    // Only set rate if already playing, otherwise just store the speed
-                    if let speed = self?.playbackSpeed, self?.isPlaying == true {
-                        self?.player?.rate = Float(speed)
-                    }
-                }
-            }
-        }
-        
-        // Observe playback end
-        playbackEndObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem,
-            queue: .main
-        ) { [weak self] _ in
-            self?.isPlaying = false
-        }
-        
-        await setupTimeObserver(player: player)
-    }
-    
-    private func setupTimeObserver(player: AVPlayer) async {
-        await MainActor.run {
-            self.player = player
-            self.isLoading = false
-
-            // Keep `isPlaying` synchronized with the actual AVPlayer state.
-            // This is critical for lock-screen toggle behavior: iOS can pause the player without
-            // calling our `pause()`, and we must reflect that so MPRemoteCommandCenter handlers
-            // don't get stuck calling "pause" when the UI shows "play".
-            timeControlStatusObserver?.invalidate()
-            timeControlStatusObserver = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] p, _ in
-                guard let self = self else { return }
-                DispatchQueue.main.async {
-                    let isActuallyPlaying = p.timeControlStatus == .playing && (p.rate > 0)
-                    if self.isPlaying != isActuallyPlaying {
-                        self.isPlaying = isActuallyPlaying
-                    }
-                }
-            }
-            
-            // Remove old time observer from the player that created it
-            if let observer = timeObserver, let observerPlayer = timeObserverPlayer {
-                observerPlayer.removeTimeObserver(observer)
-                timeObserver = nil
-                timeObserverPlayer = nil
-            }
-            
-            // Low-frequency time observer for progress bar updates only (10fps)
-            // Word sync is now handled by CADisplayLink at 60fps in OptimizedReaderView
-            let interval = CMTime(seconds: progressUpdateInterval, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-            timeObserverPlayer = player // Track which player we're adding this to
-            timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-                guard let self = self else { return }
-                
-                // VALIDATE: Check if CMTime itself is valid before extracting seconds
-                guard time.isValid && time.isNumeric else {
-                    return // Skip invalid CMTime
-                }
-                
-                let currentTime = time.seconds
-                
-                // VALIDATE: Skip invalid time values to prevent FigFilePlayer errors
-                guard currentTime.isFinite && currentTime >= 0 else {
-                    return // Skip this update
-                }
-                
-                // Update internal time tracking (high-frequency, not published)
-                self.currentTime = currentTime
-                
-                // Update UI-friendly displayTime (throttled to prevent app-wide re-renders)
-                // Only update if changed by at least 0.5 seconds to reduce UI churn
-                if abs(currentTime - self.lastDisplayTimeUpdate) >= 0.5 {
-                    self.displayTime = currentTime
-                    self.lastDisplayTimeUpdate = currentTime
-                }
-                
-                // Update Now Playing info periodically (throttled inside NowPlayingController)
-                self.updateNowPlayingMetadata()
-            }
-        }
-    }
-    
-    func play() {
-        // Keep observers installed, but avoid doing heavy work on the tap path.
-        AudioSessionController.shared.configureIfNeeded()
-
-        guard let p = player else {
-            isPlaying = false
-            return
-        }
-
-        // Prefer immediate start to reduce perceived UI lag.
-        if #available(iOS 10.0, *) {
-            p.playImmediately(atRate: Float(playbackSpeed))
-        } else {
-            p.rate = Float(playbackSpeed)
-            p.play()
-        }
-
-        // Optimistic UI update (observer will correct if needed).
-        isPlaying = true
-
-        // Force a single Now Playing update on the transition (remote commands already registered during load).
-        updateNowPlayingMetadata(force: true)
-    }
-    
-    func pause() {
-        player?.pause()
-        isPlaying = false
-
-        // Update Now Playing state
-        updateNowPlayingMetadata(force: true)
-        
-        // Save session state for mini player persistence on next launch
-        saveLastPlayedSession()
-    }
-    
-    func togglePlayPause() {
-        if isPlaying {
-            pause()
-        } else {
-            play()
-        }
-    }
-    
-    func seek(to time: Double) {
-        // VALIDATE: Ensure time is valid before seeking to prevent FigFilePlayer errors
-        guard time.isFinite && time >= 0 else {
-            print("⚠️ OptimizedAudioPlayer: Invalid seek time \(time), ignoring")
-            return
-        }
-        
-        // VALIDATE: Ensure duration is valid before clamping
-        let safeDuration = duration.isFinite && duration > 0 ? duration : 0
-        
-        // Clamp time to valid range
-        let clampedTime = min(max(0, time), max(safeDuration, 0))
-        
-        // VALIDATE: Double-check clamped time is still valid
-        guard clampedTime.isFinite && clampedTime >= 0 else {
-            print("⚠️ OptimizedAudioPlayer: Clamped time is invalid \(clampedTime), ignoring")
-            return
-        }
-        
-        let cmTime = CMTime(seconds: clampedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        
-        // VALIDATE: Ensure CMTime is valid
-        guard cmTime.isValid && cmTime.isNumeric else {
-            print("⚠️ OptimizedAudioPlayer: Invalid CMTime created from \(clampedTime), ignoring")
-            return
-        }
-        
-        // Use tolerance to prevent errors
-        player?.seek(to: cmTime, toleranceBefore: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)), toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)))
-        currentTime = clampedTime
-        displayTime = clampedTime  // Update display time immediately on seek
-        lastDisplayTimeUpdate = clampedTime
-        
-        // Note: onTimeUpdate callback removed - CADisplayLink handles word sync now
-    }
-    
-    /// Seek to specific time and wait for completion
-    /// Returns the actual time after seek completes (may differ slightly from target)
-    func seekAndWait(to time: Double) async -> Double {
-        // VALIDATE: Ensure time is valid before seeking
-        guard time.isFinite && time >= 0 else {
-            print("⚠️ OptimizedAudioPlayer: Invalid seek time \(time), ignoring")
-            return getCurrentTime()
-        }
-        
-        // VALIDATE: Ensure duration is valid before clamping
-        let safeDuration = duration.isFinite && duration > 0 ? duration : 0
-        
-        // Clamp time to valid range
-        let clampedTime = min(max(0, time), max(safeDuration, 0))
-        
-        // VALIDATE: Double-check clamped time is still valid
-        guard clampedTime.isFinite && clampedTime >= 0 else {
-            print("⚠️ OptimizedAudioPlayer: Clamped time is invalid \(clampedTime), ignoring")
-            return getCurrentTime()
-        }
-        
-        let cmTime = CMTime(seconds: clampedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        
-        // VALIDATE: Ensure CMTime is valid
-        guard cmTime.isValid && cmTime.isNumeric else {
-            print("⚠️ OptimizedAudioPlayer: Invalid CMTime created from \(clampedTime), ignoring")
-            return getCurrentTime()
-        }
-        
-        // Wait for seek to complete using completion handler
-        guard let player = player else {
-            // No player available, return current time
-            return getCurrentTime()
-        }
-        
-        return await withCheckedContinuation { continuation in
-            player.seek(
-                to: cmTime,
-                toleranceBefore: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)),
-                toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)),
-                completionHandler: { [weak self] finished in
-                    // Get actual time after seek completes (whether successful or not)
-                    let actualTime = self?.getCurrentTime() ?? clampedTime
-                    self?.currentTime = actualTime
-                    self?.displayTime = actualTime  // Update display time immediately on seek
-                    self?.lastDisplayTimeUpdate = actualTime
-                    continuation.resume(returning: actualTime)
-                }
+        private func updateNowPlayingMetadata(force: Bool = false) {
+            guard nowPlayingActivated else { return }
+            NowPlayingController.shared.updatePlaybackState(
+                elapsedTime: currentTime,
+                isPlaying: isPlaying,
+                force: force
             )
         }
-    }
-    
-    func stop() {
-        pause()
-        seek(to: 0)
-
-        // Deactivate Now Playing when stopping
-        deactivateNowPlaying()
-    }
-    
-    // Set playback speed
-    func setPlaybackSpeed(_ speed: Double) {
-        playbackSpeed = speed
-        // Apply immediately if player is available AND currently playing
-        // Don't auto-play when speed changes - only update rate if already playing
-        if let player = player, isPlaying {
-            player.rate = Float(speed)
+        
+        // MARK: - Load from Asset
+        
+        func load(asset: AVURLAsset, preloadedDuration: Double? = nil,
+                  chapterTitle: String = "", bookTitle: String = "", coverURL: URL? = nil,
+                  bookId: String = "", chapterNumber: Int = 1) async {
+            await MainActor.run {
+                self.chapterTitle = chapterTitle
+                self.bookTitle = bookTitle
+                self.coverURL = coverURL
+                self.bookId = bookId
+                self.chapterNumber = chapterNumber
+                self.saveLastPlayedSession()
+            }
+            
+            await cleanupCurrentPlayer()
+            
+            await MainActor.run {
+                isLoading = true
+                if let preloadedDuration = preloadedDuration, preloadedDuration > 0 {
+                    self.duration = preloadedDuration
+                }
+            }
+            
+            let playerItem = AVPlayerItem(asset: asset)
+            let newPlayer = AVPlayer(playerItem: playerItem)
+            newPlayer.automaticallyWaitsToMinimizeStalling = false
+            
+            await setupPlayerObservers(player: newPlayer, playerItem: playerItem)
+            
+            if playerItem.status != .readyToPlay {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    var observation: NSKeyValueObservation?
+                    var hasResumed = false
+                    observation = playerItem.observe(\.status, options: [.new]) { item, _ in
+                        if item.status == .readyToPlay || item.status == .failed {
+                            observation?.invalidate()
+                            guard !hasResumed else { return }
+                            hasResumed = true
+                            continuation.resume()
+                        }
+                    }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 10_000_000_000)
+                        observation?.invalidate()
+                        guard !hasResumed else { return }
+                        hasResumed = true
+                        continuation.resume()
+                    }
+                }
+            }
+            
+            await MainActor.run {
+                self.nowPlayingActivated = false
+                self.activateNowPlayingIfNeeded()
+                self.updateNowPlayingMetadata(force: true)
+            }
         }
-    }
-    
-    // Get current time on demand (for word sync)
-    func getCurrentTime() -> Double {
-        guard let player = player else { return 0 }
-        let time = player.currentTime()
         
-        // VALIDATE: Check if CMTime itself is valid before extracting seconds
-        guard time.isValid && time.isNumeric else {
-            return 0
+        // MARK: - Load for Background Advance
+        
+        func loadForBackgroundAdvance(asset: AVURLAsset, preloadedDuration: Double,
+                                      chapterTitle: String, bookTitle: String,
+                                      coverURL: URL?, bookId: String, chapterNumber: Int) async {
+            await MainActor.run {
+                self.chapterTitle = chapterTitle
+                self.bookTitle = bookTitle
+                self.coverURL = coverURL
+                self.bookId = bookId
+                self.chapterNumber = chapterNumber
+                self.duration = preloadedDuration
+                self.currentTime = 0
+                self.displayTime = 0
+                self.lastDisplayTimeUpdate = 0
+                self.isLoading = true
+                self.saveLastPlayedSession()
+            }
+            
+            let playerItem = AVPlayerItem(asset: asset)
+            let newPlayer = AVPlayer(playerItem: playerItem)
+            newPlayer.automaticallyWaitsToMinimizeStalling = false
+            
+            await MainActor.run {
+                if let observer = self.timeObserver, let observerPlayer = self.timeObserverPlayer {
+                    observerPlayer.removeTimeObserver(observer)
+                    self.timeObserver = nil
+                    self.timeObserverPlayer = nil
+                }
+                if let observer = self.playbackEndObserver {
+                    NotificationCenter.default.removeObserver(observer)
+                    self.playbackEndObserver = nil
+                }
+                if let observer = self.playbackErrorObserver {
+                    NotificationCenter.default.removeObserver(observer)
+                    self.playbackErrorObserver = nil
+                }
+                self.durationObserver?.invalidate()
+                self.durationObserver = nil
+                self.timeControlStatusObserver?.invalidate()
+                self.timeControlStatusObserver = nil
+                print("🔄 loadForBackgroundAdvance: Pausing old player")
+                self.player?.pause()
+                self.player = nil
+                self.isLoading = false
+                self.didReachEnd = false
+                print("🔄 loadForBackgroundAdvance: Old player cleared")
+            }
+            
+            print("🔄 loadForBackgroundAdvance: Setting up observers...")
+            await setupPlayerObservers(player: newPlayer, playerItem: playerItem)
+            print("🔄 loadForBackgroundAdvance: Observers set up")
+            
+            await MainActor.run {
+                print("🔄 loadForBackgroundAdvance: Updating Now Playing...")
+                self.nowPlayingActivated = false
+                self.activateNowPlayingIfNeeded()
+                self.updateNowPlayingMetadata(force: true)
+                print("🔄 loadForBackgroundAdvance: Done. isPlaying=\(self.isPlaying)")
+            }
         }
         
-        let seconds = time.seconds
+        // MARK: - Load from URL
         
-        // VALIDATE: Return 0 if time is invalid to prevent FigFilePlayer errors
-        guard seconds.isFinite && seconds >= 0 else {
-            return 0
+        func load(url: URL, preloadedDuration: Double? = nil,
+                  chapterTitle: String = "", bookTitle: String = "", coverURL: URL? = nil,
+                  bookId: String = "", chapterNumber: Int = 1) async {
+            await MainActor.run {
+                self.chapterTitle = chapterTitle
+                self.bookTitle = bookTitle
+                self.coverURL = coverURL
+                self.bookId = bookId
+                self.chapterNumber = chapterNumber
+                self.saveLastPlayedSession()
+            }
+            
+            await cleanupCurrentPlayer()
+            
+            await MainActor.run {
+                isLoading = true
+                if let preloadedDuration = preloadedDuration, preloadedDuration > 0 {
+                    self.duration = preloadedDuration
+                }
+            }
+            
+            let playerItem = AVPlayerItem(url: url)
+            let newPlayer = AVPlayer(playerItem: playerItem)
+            newPlayer.automaticallyWaitsToMinimizeStalling = false
+            
+            await setupPlayerObservers(player: newPlayer, playerItem: playerItem)
+            
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.activateNowPlayingIfNeeded()
+                self.updateNowPlayingMetadata(force: true)
+            }
         }
         
-        return seconds
-    }
-    
-    // Note: No deinit needed for singleton - it lives for the app's lifetime.
-    // Cleanup happens in cleanupCurrentPlayer() when loading new content.
-}
-
-// MARK: - DisplayLink Target Helper
-private class DisplayLinkTarget: NSObject {
-    private let minIntervalProvider: () -> CFTimeInterval
-    private let callback: () -> Void
-    private var lastFireTimestamp: CFTimeInterval = 0
-    
-    init(minIntervalProvider: @escaping () -> CFTimeInterval, callback: @escaping () -> Void) {
-        self.minIntervalProvider = minIntervalProvider
-        self.callback = callback
-        super.init()
-    }
-    
-    @objc func tick(_ displayLink: CADisplayLink) {
-        let minInterval = minIntervalProvider()
-        if minInterval > 0 {
-            let ts = displayLink.timestamp
-            if lastFireTimestamp > 0, (ts - lastFireTimestamp) < minInterval {
+        // MARK: - Cleanup
+        
+        private func cleanupCurrentPlayer() async {
+            deactivateNowPlaying()
+            await MainActor.run {
+                if let observer = timeObserver, let observerPlayer = timeObserverPlayer {
+                    observerPlayer.removeTimeObserver(observer)
+                    timeObserver = nil
+                    timeObserverPlayer = nil
+                }
+                if let observer = playbackEndObserver {
+                    NotificationCenter.default.removeObserver(observer)
+                    playbackEndObserver = nil
+                }
+                if let observer = playbackErrorObserver {
+                    NotificationCenter.default.removeObserver(observer)
+                    playbackErrorObserver = nil
+                }
+                durationObserver?.invalidate()
+                durationObserver = nil
+                timeControlStatusObserver?.invalidate()
+                timeControlStatusObserver = nil
+                player?.pause()
+                player = nil
+                isPlaying = false
+                currentTime = 0
+                displayTime = 0
+                duration = 0
+                didReachEnd = false
+            }
+        }
+        
+        // MARK: - Player Observers
+        
+        private func setupPlayerObservers(player: AVPlayer, playerItem: AVPlayerItem) async {
+            playbackErrorObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: playerItem,
+                queue: .main
+            ) { [weak self] notification in
+                if let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error {
+                    print("⚠️ OptimizedAudioPlayer: Playback error: \(error.localizedDescription)")
+                }
+            }
+            
+            durationObserver = playerItem.observe(\.status, options: [.new]) { [weak self] item, _ in
+                if item.status == .readyToPlay {
+                    DispatchQueue.main.async {
+                        let durationCMTime = item.duration
+                        guard durationCMTime.isValid && durationCMTime.isNumeric else {
+                            self?.isLoading = false
+                            return
+                        }
+                        let duration = durationCMTime.seconds
+                        if duration.isFinite && duration > 0 {
+                            if self?.duration == 0 || self?.duration == nil {
+                                self?.duration = duration
+                            }
+                        }
+                        self?.isLoading = false
+                        if let speed = self?.playbackSpeed, self?.isPlaying == true {
+                            self?.player?.rate = Float(speed)
+                        }
+                    }
+                }
+            }
+            
+            playbackEndObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: playerItem,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self = self else { return }
+                self.isPlaying = false
+                self.didReachEnd = true
+                
+                if let data = self.preloadedData {
+                    let book = data.book
+                    let currentOrder = data.chapter.order
+                    let sortedChapters = book.chapters.sorted { $0.order < $1.order }
+                    if let nextChapter = sortedChapters.first(where: { $0.order == currentOrder + 1 }) {
+                        print("🔄 OptimizedAudioPlayer: Chapter ended, background loading next chapter '\(nextChapter.title)'")
+                        BackgroundChapterLoader.shared.loadAndPlay(
+                            bookId: book.id,
+                            chapterNumber: nextChapter.order + 1
+                        )
+                    } else {
+                        print("ℹ️ OptimizedAudioPlayer: No next chapter - book complete")
+                    }
+                }
+            }
+            
+            await setupTimeObserver(player: player)
+        }
+        
+        private func setupTimeObserver(player: AVPlayer) async {
+            await MainActor.run {
+                self.player = player
+                self.isLoading = false
+                
+                timeControlStatusObserver?.invalidate()
+                timeControlStatusObserver = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] p, _ in
+                    guard let self = self else { return }
+                    DispatchQueue.main.async {
+                        let isActuallyPlaying = p.timeControlStatus == .playing && (p.rate > 0)
+                        if self.isPlaying != isActuallyPlaying {
+                            self.isPlaying = isActuallyPlaying
+                        }
+                    }
+                }
+                
+                if let observer = timeObserver, let observerPlayer = timeObserverPlayer {
+                    observerPlayer.removeTimeObserver(observer)
+                    timeObserver = nil
+                    timeObserverPlayer = nil
+                }
+                
+                let interval = CMTime(seconds: progressUpdateInterval, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+                timeObserverPlayer = player
+                timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+                    guard let self = self else { return }
+                    guard time.isValid && time.isNumeric else { return }
+                    let currentTime = time.seconds
+                    guard currentTime.isFinite && currentTime >= 0 else { return }
+                    self.currentTime = currentTime
+                    if abs(currentTime - self.lastDisplayTimeUpdate) >= 0.5 {
+                        self.displayTime = currentTime
+                        self.lastDisplayTimeUpdate = currentTime
+                    }
+                    self.updateNowPlayingMetadata()
+                }
+            }
+        }
+        
+        // MARK: - Playback Controls
+        
+        func play() {
+            AudioSessionController.shared.configureIfNeeded()
+            guard let p = player else {
+                isPlaying = false
                 return
             }
-            lastFireTimestamp = ts
+            if #available(iOS 10.0, *) {
+                p.playImmediately(atRate: Float(playbackSpeed))
+            } else {
+                p.rate = Float(playbackSpeed)
+                p.play()
+            }
+            isPlaying = true
+            updateNowPlayingMetadata(force: true)
         }
         
-        self.callback() // Explicitly use self to avoid warning
+        func pause() {
+            player?.pause()
+            isPlaying = false
+            updateNowPlayingMetadata(force: true)
+            saveLastPlayedSession()
+        }
+        
+        func togglePlayPause() {
+            if isPlaying { pause() } else { play() }
+        }
+        
+        func seek(to time: Double) {
+            guard time.isFinite && time >= 0 else {
+                print("⚠️ OptimizedAudioPlayer: Invalid seek time \(time), ignoring")
+                return
+            }
+            let safeDuration = duration.isFinite && duration > 0 ? duration : 0
+            let clampedTime = min(max(0, time), max(safeDuration, 0))
+            guard clampedTime.isFinite && clampedTime >= 0 else {
+                print("⚠️ OptimizedAudioPlayer: Clamped time is invalid \(clampedTime), ignoring")
+                return
+            }
+            let cmTime = CMTime(seconds: clampedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            guard cmTime.isValid && cmTime.isNumeric else {
+                print("⚠️ OptimizedAudioPlayer: Invalid CMTime created from \(clampedTime), ignoring")
+                return
+            }
+            player?.seek(to: cmTime,
+                         toleranceBefore: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)),
+                         toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)))
+            currentTime = clampedTime
+            displayTime = clampedTime
+            lastDisplayTimeUpdate = clampedTime
+        }
+        
+        func seekAndWait(to time: Double) async -> Double {
+            guard time.isFinite && time >= 0 else {
+                print("⚠️ OptimizedAudioPlayer: Invalid seek time \(time), ignoring")
+                return getCurrentTime()
+            }
+            let safeDuration = duration.isFinite && duration > 0 ? duration : 0
+            let clampedTime = min(max(0, time), max(safeDuration, 0))
+            guard clampedTime.isFinite && clampedTime >= 0 else {
+                print("⚠️ OptimizedAudioPlayer: Clamped time is invalid \(clampedTime), ignoring")
+                return getCurrentTime()
+            }
+            let cmTime = CMTime(seconds: clampedTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+            guard cmTime.isValid && cmTime.isNumeric else {
+                print("⚠️ OptimizedAudioPlayer: Invalid CMTime created from \(clampedTime), ignoring")
+                return getCurrentTime()
+            }
+            guard let player = player else { return getCurrentTime() }
+            return await withCheckedContinuation { continuation in
+                player.seek(
+                    to: cmTime,
+                    toleranceBefore: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)),
+                    toleranceAfter: CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC)),
+                    completionHandler: { [weak self] _ in
+                        let actualTime = self?.getCurrentTime() ?? clampedTime
+                        self?.currentTime = actualTime
+                        self?.displayTime = actualTime
+                        self?.lastDisplayTimeUpdate = actualTime
+                        continuation.resume(returning: actualTime)
+                    }
+                )
+            }
+        }
+        
+        func stop() {
+            pause()
+            seek(to: 0)
+            deactivateNowPlaying()
+        }
+        
+        func setPlaybackSpeed(_ speed: Double) {
+            playbackSpeed = speed
+            if let player = player, isPlaying {
+                player.rate = Float(speed)
+            }
+        }
+        
+        func setVolume(_ volume: Float) {
+            player?.volume = volume
+        }
+        func getCurrentTime() -> Double {
+            guard let player = player else { return 0 }
+            let time = player.currentTime()
+            guard time.isValid && time.isNumeric else { return 0 }
+            let seconds = time.seconds
+            guard seconds.isFinite && seconds >= 0 else { return 0 }
+            return seconds
+        }
+    }
+    
+    // MARK: - DisplayLink Target Helper
+    private class DisplayLinkTarget: NSObject {
+        private let minIntervalProvider: () -> CFTimeInterval
+        private let callback: () -> Void
+        private var lastFireTimestamp: CFTimeInterval = 0
+        
+        init(minIntervalProvider: @escaping () -> CFTimeInterval, callback: @escaping () -> Void) {
+            self.minIntervalProvider = minIntervalProvider
+            self.callback = callback
+            super.init()
+        }
+        
+        @objc func tick(_ displayLink: CADisplayLink) {
+            let minInterval = minIntervalProvider()
+            if minInterval > 0 {
+                let ts = displayLink.timestamp
+                if lastFireTimestamp > 0, (ts - lastFireTimestamp) < minInterval {
+                    return
+                }
+                lastFireTimestamp = ts
+            }
+            
+            self.callback() // Explicitly use self to avoid warning
+        }
+    }
+    
+    // MARK: - Sync Gate (shared with DisplayLink throttling)
+    @MainActor
+    private final class ReaderSyncGate: ObservableObject {
+        @Published var isUserDraggingScroll: Bool = false
+        let isAgentDebugLoggingEnabled: Bool = false
+    }
+    
+    // MARK: - Explanation Overlay View
+    /// Lightweight overlay showing context-specific term explanations
+    struct ExplanationOverlayView: View {
+        let term: ExplainableTerm
+        let themeColors: ThemeColors
+        let isLightBackground: Bool
+        let onDismiss: () -> Void
+        
+        var body: some View {
+            ZStack {
+                // Semi-transparent backdrop
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        onDismiss()
+                    }
+                
+                // Explanation card
+                VStack(alignment: .leading, spacing: 12) {
+                    // Header with term and type badge
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(term.term)
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundColor(themeColors.text)
+                            
+                            // Type badge
+                            HStack(spacing: 4) {
+                                Image(systemName: term.type.icon)
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(term.type.displayName)
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(themeColors.primary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(themeColors.primary.opacity(0.15))
+                            .clipShape(Capsule())
+                        }
+                        
+                        Spacer()
+                        
+                        // Close button
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 24))
+                                .foregroundColor(themeColors.textSecondary)
+                        }
+                    }
+                    
+                    // Divider
+                    Rectangle()
+                        .fill(themeColors.cardBorder)
+                        .frame(height: 1)
+                    
+                    // Explanation text
+                    Text(term.shortExplanation)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundColor(themeColors.text.opacity(0.9))
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(20)
+                .background(themeColors.card.opacity(isLightBackground ? 0.98 : 0.95))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(themeColors.cardBorder, lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.25), radius: 20, x: 0, y: 10)
+                .frame(maxWidth: 340)
+                .padding(.horizontal, 24)
+            }
+            .animation(.easeInOut(duration: 0.2), value: term.id)
+        }
+    }
+    
+// MARK: - Share Sheet
+// MARK: - Note Editor Card (isolated view so drag state never re-renders parent)
+private struct NoteEditorCard: View {
+    let sentenceText: String
+    let sentenceIndex: Int
+    @Binding var noteText: String
+    var isNoteFieldFocused: FocusState<Bool>.Binding
+    let hasExistingNote: Bool
+    let keyboardHeight: CGFloat
+    let readerFont: ReaderFont
+    let readerColors: ThemeColors
+    let isLightBackground: Bool
+    let usesDominantColorBackground: Bool
+    let onSave: (String) -> Void
+    let onDelete: () -> Void
+    let onDismiss: () -> Void
+
+    // Drag lives entirely inside this struct — zero parent re-renders during drag
+    @GestureState private var dragOffset: CGFloat = 0
+    @State private var isDismissing: Bool = false
+
+    private var safeBottom: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?.windows.first?.safeAreaInsets.bottom ?? 0
+    }
+
+    private var prompts: [String] {
+        ["What does this remind you of?",
+         "Why did this stand out?",
+         "How does this apply to you?",
+         "What would you do differently?",
+         "Write your thought here..."]
+    }
+
+    var body: some View {
+        let clampedDrag = max(dragOffset, 0)
+        let prompt = prompts[sentenceIndex % prompts.count]
+
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+
+            VStack(alignment: .leading, spacing: 0) {
+
+                // — Drag handle —
+                HStack {
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(readerColors.text.opacity(0.25))
+                        .frame(width: 36, height: 4)
+                    Spacer()
+                }
+                .padding(.top, 12)
+                .padding(.bottom, 16)
+                .contentShape(Rectangle())
+                .onTapGesture { isNoteFieldFocused.wrappedValue = false }
+
+                // — Sentence preview —
+                Text(sentenceText)
+                    .font(readerFont.swiftUIFont(size: 13))
+                    .foregroundColor(readerColors.text.opacity(0.45))
+                    .lineLimit(3)
+                    .lineSpacing(3)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 14)
+
+                // — Divider —
+                Rectangle()
+                    .fill(readerColors.text.opacity(isLightBackground ? 0.1 : 0.14))
+                    .frame(height: 0.5)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 14)
+
+                // — Text input —
+                ZStack(alignment: .topLeading) {
+                    if noteText.isEmpty {
+                        Text(prompt)
+                            .font(readerFont.swiftUIFont(size: 16))
+                            .foregroundColor(readerColors.text.opacity(0.28))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $noteText)
+                        .font(readerFont.swiftUIFont(size: 16))
+                        .foregroundColor(readerColors.text)
+                        .scrollContentBackground(.hidden)
+                        .background(Color.clear)
+                        .frame(minHeight: 110, maxHeight: 180)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .focused(isNoteFieldFocused)
+                }
+
+                // — Action row —
+                HStack(spacing: 12) {
+                    Button(action: {
+                        isNoteFieldFocused.wrappedValue = false
+                        onDismiss()
+                    }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(readerColors.text.opacity(0.6))
+                            .modifier(GlassCircleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground, size: 40))
+                    }
+
+                    Spacer()
+
+                    if hasExistingNote {
+                        Button(action: {
+                            isNoteFieldFocused.wrappedValue = false
+                            onDelete()
+                        }) {
+                            Text("Delete")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(readerColors.text.opacity(0.5))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .modifier(GlassCapsuleModifier(isLight: isLightBackground, isDynamic: usesDominantColorBackground))
+                        }
+                    }
+
+                    Button(action: {
+                        isNoteFieldFocused.wrappedValue = false
+                        onSave(noteText)
+                    }) {
+                        let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        Text(trimmed.isEmpty ? "Skip" : "Save")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(trimmed.isEmpty ? readerColors.text.opacity(0.5) : readerColors.primaryText)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                            .background(trimmed.isEmpty ? Color.clear : readerColors.primary)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 14)
+                .padding(.bottom, keyboardHeight > 0 ? 12 : max(safeBottom, 20))
+            }
+            .padding(.bottom, keyboardHeight > 0 ? keyboardHeight : 0)
+            .background {
+                if #available(iOS 26.0, *) {
+                    if usesDominantColorBackground {
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .glassEffect(.clear.tint(Color.black.opacity(isLightBackground ? 0.25 : 0.5)).interactive(), in: .rect(cornerRadius: 28))
+                    } else {
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 28))
+                            .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                            .id(isLightBackground)
+                    }
+                } else {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .shadow(color: Color.black.opacity(isLightBackground ? 0.12 : 0.35), radius: 28, x: 0, y: -8)
+            .padding(.horizontal, 8)
+            .padding(.bottom, keyboardHeight > 0 ? 0 : safeBottom > 0 ? 0 : 8)
+            // @GestureState offset: updates without re-rendering parent, zero fighting
+            .offset(y: clampedDrag)
+            .gesture(
+                DragGesture(minimumDistance: 8)
+                    .updating($dragOffset) { value, state, _ in
+                        state = value.translation.height
+                    }
+                    .onEnded { value in
+                        if value.translation.height > 80 || value.predictedEndTranslation.height > 160 {
+                            isNoteFieldFocused.wrappedValue = false
+                            onDismiss()
+                        }
+                        // @GestureState resets to 0 automatically on release — spring back is free
+                    }
+            )
+        }
+        .ignoresSafeArea(edges: .bottom)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }
 
-// MARK: - Sync Gate (shared with DisplayLink throttling)
-@MainActor
-private final class ReaderSyncGate: ObservableObject {
-    @Published var isUserDraggingScroll: Bool = false
-    let isAgentDebugLoggingEnabled: Bool = false
-}
-
-// MARK: - Explanation Overlay View
-/// Lightweight overlay showing context-specific term explanations
-struct ExplanationOverlayView: View {
-    let term: ExplainableTerm
-    let themeColors: ThemeColors
-    let isLightBackground: Bool
+private struct SentenceShareOverlayView: View {
+    let text: String
+    let bookTitle: String
+    let bookAuthor: String
+    let chapterTitle: String
+    let coverURLString: String?
+    let currentReaderBackground: ReaderBackgroundColor
+    let readerColors: ThemeColors
+    let readerFont: ReaderFont
     let onDismiss: () -> Void
+    let preloadedCoverImage: UIImage?
+        let preloadedDominantColor: Color?
+        let usesReaderDominantColor: Bool
+        
+        @State private var selectedColor: ReaderBackgroundColor = .dark
+        @State private var useCoverBackground: Bool = false
+        private var dominantColor: Color? { preloadedDominantColor }
+    
+    @State private var useDominantColor: Bool = false
+    @State private var dominantColorTextVariant: DominantTextVariant = .white
+
+    enum DominantTextVariant {
+        case white, black
+    }
+    
+    private var isReaderLight: Bool {
+        if usesReaderDominantColor { return false }
+        switch currentReaderBackground {
+        case .light, .cream: return true
+        case .dark, .blue: return false
+        }
+    }
+    private var isShareCardLight: Bool {
+        if useDominantColor {
+            return isDominantColorLight
+        }
+        if useCoverBackground { return false }
+        return selectedColor == .light || selectedColor == .cream
+    }
+    
+    private var statusBarHeight: CGFloat {
+            (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.safeAreaInsets.top ?? 50
+        }
+        
+        private var safeAreaBottom: CGFloat {
+            (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.windows.first?.safeAreaInsets.bottom ?? 34
+        }
+        
+        private var screenHeight: CGFloat {
+            UIScreen.main.bounds.height
+        }
+        
+        // Card lives between status bar and the swatches+buttons area (~220pt)
+        private var cardViewportHeight: CGFloat {
+            screenHeight - statusBarHeight - 16 - 220 - safeAreaBottom
+        }
+        
+    private var isDominantColorLight: Bool {
+        if useDominantColor {
+            // Variant drives text color: white variant = dark card (light=false), black variant = light card (light=true)
+            return dominantColorTextVariant == .black
+        }
+        guard let dominant = dominantColor else { return false }
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(dominant).getRed(&r, green: &g, blue: &b, alpha: &a)
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return luminance > 0.5
+    }
+        
+        private var cardTextColor: Color {
+            if useCoverBackground { return Color(hex: "#F0F4F8") }
+            if useDominantColor { return isDominantColorLight ? Color(hex: "#1A1A1A") : Color(hex: "#F0F4F8") }
+            switch selectedColor {
+            case .light, .cream: return Color(hex: "#2D2D2D")
+            case .dark, .blue:   return Color(hex: "#E8EEF4")
+            }
+        }
+        
+        private var cardSubtextColor: Color {
+            if useCoverBackground { return Color(hex: "#B8C8D8") }
+            if useDominantColor { return isDominantColorLight ? Color(hex: "#242424") : Color(hex: "#B8C8D8") }
+            switch selectedColor {
+            case .light, .cream: return Color(hex: "#6B6B6B")
+            case .dark, .blue:   return Color(hex: "#8899AA")
+            }
+        }
     
     var body: some View {
         ZStack {
-            // Semi-transparent backdrop
-            Color.black.opacity(0.3)
+            Color.clear
+                .background(.ultraThinMaterial)
                 .ignoresSafeArea()
-                .onTapGesture {
-                    onDismiss()
-                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onTapGesture { onDismiss() }
             
-            // Explanation card
-            VStack(alignment: .leading, spacing: 12) {
-                // Header with term and type badge
-                HStack(alignment: .top, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(term.term)
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundColor(themeColors.text)
-                        
-                        // Type badge
-                        HStack(spacing: 4) {
-                            Image(systemName: term.type.icon)
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(term.type.displayName)
-                                .font(.system(size: 11, weight: .semibold))
+            VStack(spacing: 0) {
+                Spacer()
+                
+                VStack(spacing: 0) {
+                    quoteCardView
+                        .padding(.horizontal, 28)
+                        .padding(.top, statusBarHeight + 10)
+                        .frame(maxHeight: .infinity)
+                        .shadow(color: .black.opacity(0.45), radius: 24, x: 0, y: 12)
+                        .animation(.easeInOut(duration: 0.18), value: selectedColor)
+                    
+                    // Color swatches
+                    HStack(spacing: 18) {
+                        ForEach(ReaderBackgroundColor.allCases, id: \.self) { color in
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    selectedColor = color
+                                    useCoverBackground = false
+                                    useDominantColor = false
+                                }
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(color.color)
+                                        .frame(width: 30, height: 30)
+                                        .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                                    if selectedColor == color && !useCoverBackground && !useDominantColor {
+                                        Circle()
+                                            .strokeBorder(.white.opacity(0.9), lineWidth: 2.5)
+                                            .frame(width: 38, height: 38)
+                                    }
+                                }
+                            }
                         }
-                        .foregroundColor(themeColors.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(themeColors.primary.opacity(0.15))
-                        .clipShape(Capsule())
+                        
+                        if let urlString = coverURLString, let url = URL(string: urlString) {
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    useCoverBackground = true
+                                    useDominantColor = false
+                                }
+                            }) {
+                                ZStack {
+                                    AsyncImage(url: url) { image in
+                                        image.resizable().scaledToFill()
+                                    } placeholder: {
+                                        Color.gray
+                                    }
+                                    .frame(width: 30, height: 30)
+                                    .clipShape(Circle())
+                                    .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                                    if useCoverBackground {
+                                        Circle()
+                                            .strokeBorder(.white.opacity(0.9), lineWidth: 2.5)
+                                            .frame(width: 38, height: 38)
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if let dominant = dominantColor {
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    useDominantColor = true
+                                    dominantColorTextVariant = .white
+                                    useCoverBackground = false
+                                }
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(dominant)
+                                        .frame(width: 30, height: 30)
+                                        .overlay(
+                                            GeometryReader { g in
+                                                Path { p in
+                                                    p.move(to: CGPoint(x: g.size.width, y: 0))
+                                                    p.addLine(to: CGPoint(x: g.size.width, y: g.size.height))
+                                                    p.addLine(to: CGPoint(x: 0, y: g.size.height))
+                                                    p.closeSubpath()
+                                                }
+                                                .fill(Color.white)
+                                            }
+                                            .clipShape(Circle())
+                                        )
+                                        .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                                    if useDominantColor && dominantColorTextVariant == .white {
+                                        Circle()
+                                            .strokeBorder(.white.opacity(0.9), lineWidth: 2.5)
+                                            .frame(width: 38, height: 38)
+                                    }
+                                }
+                            }
+                            
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    useDominantColor = true
+                                    dominantColorTextVariant = .black
+                                    useCoverBackground = false
+                                }
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(dominant)
+                                        .frame(width: 30, height: 30)
+                                        .overlay(
+                                            GeometryReader { g in
+                                                Path { p in
+                                                    p.move(to: CGPoint(x: g.size.width, y: 0))
+                                                    p.addLine(to: CGPoint(x: g.size.width, y: g.size.height))
+                                                    p.addLine(to: CGPoint(x: 0, y: g.size.height))
+                                                    p.closeSubpath()
+                                                }
+                                                .fill(Color.black)
+                                            }
+                                            .clipShape(Circle())
+                                        )
+                                        .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                                    if useDominantColor && dominantColorTextVariant == .black {
+                                        Circle()
+                                            .strokeBorder(.white.opacity(0.9), lineWidth: 2.5)
+                                            .frame(width: 38, height: 38)
+                                    }
+                                }
+                            }
+                        }
                     }
+                    .padding(.top, 22)
                     
-                    Spacer()
+                    // Action buttons
+                    HStack(spacing: 12) {
+                        Button(action: { saveImageToPhotos() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.down.to.line.alt")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text("Save to Photos")
+                                    .font(.system(size: 15, weight: .semibold))
+                            }
+                            .foregroundColor(readerColors.text)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .modifier(ShareButtonGlassModifier(isLight: isReaderLight, isDynamic: usesReaderDominantColor))                        }
+
+                        Button(action: { shareAsImage() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text("Share")
+                                    .font(.system(size: 15, weight: .semibold))
+                            }
+                            .foregroundColor(readerColors.text)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .modifier(ShareButtonGlassModifier(isLight: isReaderLight, isDynamic: usesReaderDominantColor))                        }
+                    }
+                    .padding(.top, 16)
+                    .padding(.horizontal, 28)
                     
-                    // Close button
                     Button(action: onDismiss) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 24))
-                            .foregroundColor(themeColors.textSecondary)
+                        Text("Cancel")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white.opacity(0.7))
+                            .padding(.vertical, 14)
+                            .frame(maxWidth: .infinity)
                     }
+                    .padding(.horizontal, 28)
+                    .padding(.top, 2)
+                    .padding(.bottom, safeAreaBottom + 0)
                 }
-                
-                // Divider
-                Rectangle()
-                    .fill(themeColors.cardBorder)
-                    .frame(height: 1)
-                
-                // Explanation text
-                Text(term.shortExplanation)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundColor(themeColors.text.opacity(0.9))
-                    .lineSpacing(4)
-                    .fixedSize(horizontal: false, vertical: true)
+                .background(
+                    Color(UIColor.systemBackground).opacity(0.001)
+                )
+                .gesture(
+                    DragGesture(minimumDistance: 30)
+                        .onEnded { value in
+                            if value.translation.height > 60 {
+                                onDismiss()
+                            }
+                        }
+                )
             }
-            .padding(20)
-            .background(themeColors.card.opacity(isLightBackground ? 0.98 : 0.95))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(themeColors.cardBorder, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.25), radius: 20, x: 0, y: 10)
-            .frame(maxWidth: 340)
-            .padding(.horizontal, 24)
         }
-        .animation(.easeInOut(duration: 0.2), value: term.id)
+        .onAppear {
+            if usesReaderDominantColor {
+                useDominantColor = true
+                dominantColorTextVariant = .white
+            } else {
+                selectedColor = currentReaderBackground
+            }
+        }
+    } // closes var body
+                    
+    private func saveImageToPhotos() {
+                guard #available(iOS 16.0, *) else { return }
+                let cardWidth = UIScreen.main.bounds.width - 56
+                let cardHeight = cardViewportHeight
+                let exportCard = quoteCardView.frame(width: cardWidth, height: cardHeight)
+                onDismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    let renderer = ImageRenderer(content: exportCard)
+                    renderer.scale = 3.0
+                    renderer.proposedSize = ProposedViewSize(width: cardWidth, height: cardHeight)
+                    guard let image = renderer.uiImage else { return }
+                    UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+                }
+            }
+        
+        private func dynamicFontSize(for text: String, in size: CGSize) -> CGFloat {
+            guard size.width > 0, size.height > 0 else { return 17 }
+           
+           // Binary search for the largest font size that fits
+           var lo: CGFloat = 10
+           var hi: CGFloat = 22  // Cap at 22pt — beyond this line spacing feels stretched
+            
+            while hi - lo > 0.5 {
+                let mid = (lo + hi) / 2
+                let fits = textFits(text, fontSize: mid, in: size)
+                if fits { lo = mid } else { hi = mid }
+            }
+            
+            return floor(lo)
+        }
+        
+    private func textFits(_ text: String, fontSize: CGFloat, in size: CGSize) -> Bool {
+            let font = readerFont.uiFont(size: fontSize)
+            let lineSpacing = fontSize * 0.15
+            
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineSpacing = lineSpacing
+            
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .paragraphStyle: paragraphStyle
+            ]
+            
+            let boundingRect = (text as NSString).boundingRect(
+                with: CGSize(width: size.width, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes,
+                context: nil
+            )
+            
+        return boundingRect.height <= size.height - 36
+    }
+        
+        private var coverURL: URL? {
+           guard let s = coverURLString else { return nil }
+           return URL(string: s)
+       }
+       
+       private var quoteCardView: some View {
+           ZStack(alignment: .topLeading) {
+               if useDominantColor, let dominant = dominantColor {
+                                  dominant
+               } else if useCoverBackground {
+                   GeometryReader { geo in
+                       ZStack {
+                           if let uiImage = preloadedCoverImage {
+                               Image(uiImage: uiImage)
+                                   .resizable()
+                                   .scaledToFill()
+                                   .frame(width: geo.size.width, height: geo.size.height)
+                                   .clipped()
+                           } else if let url = coverURL {
+                               AsyncImage(url: url) { image in
+                                   image
+                                       .resizable()
+                                       .scaledToFill()
+                                       .frame(width: geo.size.width, height: geo.size.height)
+                                       .clipped()
+                               } placeholder: {
+                                   Color.gray
+                               }
+                           } else {
+                               Color.gray
+                           }
+
+                           // Blur + darken so text is always readable
+                           Rectangle()
+                               .fill(.ultraThinMaterial)
+                               .environment(\.colorScheme, .dark)
+                       }
+                   }
+               }
+               else {
+                                             selectedColor.color
+                                         }
+                
+               VStack(alignment: .leading, spacing: 0) {
+                   // Top row: quote mark + ReadBetter logo
+                   HStack(alignment: .center) {
+                       Text("\u{201C}")
+                           .font(.system(size: 56, weight: .bold, design: .serif))
+                           .foregroundColor(cardTextColor.opacity(0.15))
+                           .offset(x: -4, y: 0)
+                           .frame(height: 36)
+                       
+                       Spacer()
+                       
+                       HStack(spacing: 4) {
+                                                  Text("Read")
+                                                      .font(.system(size: 18, weight: .bold))
+                                                      .foregroundColor(.black)
+                                                      .padding(.horizontal, 5)
+                                                      .padding(.vertical, 2)
+                                                      .background(Color(hex: "#FFD600"))
+                                                      .cornerRadius(0)
+                                                  Text("Better")
+                                                      .font(.system(size: 18, weight: .bold))
+                                                      .foregroundColor(.white)
+                                              }
+                   }
+                   
+                   Spacer(minLength: 0)
+                   
+                   // Quote text — scales down to fit, centers if short
+                   GeometryReader { geo in
+                        let fontSize = dynamicFontSize(for: text, in: geo.size)
+                        Text(text)
+                            .font(readerFont.swiftUIFont(size: fontSize))
+                            .foregroundColor(cardTextColor)
+                            .lineSpacing(fontSize * 0.2)
+                            .lineLimit(nil)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                            .padding(.top, 5)
+                            .padding(.bottom, 20)
+
+                    }
+                    
+                    Spacer(minLength: 0)
+                    
+                    // Divider
+                    Rectangle()
+                        .fill(cardTextColor.opacity(0.12))
+                        .frame(height: 1)
+                        .padding(.bottom, 12)
+                    
+                    // Footer: book info + branding
+                   HStack(alignment: .bottom) {
+                       VStack(alignment: .leading, spacing: 3) {
+                           // BOOK TITLE · CHAPTER TITLE
+                           HStack(spacing: 6) {
+                               Text(bookTitle)
+                                   .font(.system(size: 12, weight: .bold))
+                                   .foregroundColor(cardTextColor.opacity(0.9))
+                                   .lineLimit(2)
+                                   .fixedSize(horizontal: false, vertical: true)
+                               Text("·")
+                                   .font(.system(size: 12, weight: .bold))
+                                   .foregroundColor(cardSubtextColor)
+                                   .fixedSize()
+                               Text(chapterTitle)
+                                   .font(.system(size: 12, weight: .bold))
+                                   .foregroundColor(cardTextColor.opacity(0.9))
+                                   .lineLimit(2)
+                                   .fixedSize(horizontal: false, vertical: true)
+                           }
+                           // Author below
+                                                      Text(bookAuthor)
+                                                          .font(.system(size: 11))
+                                                          .foregroundColor(cardSubtextColor)
+                                                          .lineLimit(1)
+                                                  }
+                                              }
+                }
+                .padding(22)
+            }
+           .frame(maxHeight: cardViewportHeight)
+                   .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                   .animation(.easeInOut(duration: 0.18), value: useCoverBackground)
+               }
+    
+    private func shareAsImage() {
+        guard #available(iOS 16.0, *) else {
+            let activityVC = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+            presentActivityVC(activityVC)
+            return
+        }
+        
+        let cardWidth = UIScreen.main.bounds.width - 56 // matches .padding(.horizontal, 28)
+        let cardHeight = cardViewportHeight
+        
+        // Render the exact same quoteCardView you see on screen
+        let exportCard = quoteCardView
+            .frame(width: cardWidth, height: cardHeight)
+        
+        onDismiss()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    let renderer = ImageRenderer(content: exportCard)
+                    renderer.scale = 3.0
+                    renderer.proposedSize = ProposedViewSize(width: cardWidth, height: cardHeight)
+                    
+                    guard let image = renderer.uiImage else { return }
+                    let activityVC = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+                    presentActivityVC(activityVC)
+                }
+            }
+            
+            private func presentActivityVC(_ vc: UIActivityViewController) {
+                guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                      let window = windowScene.windows.first else { return }
+                var topVC = window.rootViewController
+                while let presented = topVC?.presentedViewController { topVC = presented }
+                topVC?.present(vc, animated: true)
+            }
+        } // ← closes SentenceShareOverlayView
+
+// MARK: - Share Button Glass Modifier
+private struct ShareButtonGlassModifier: ViewModifier {
+    let isLight: Bool
+    let isDynamic: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if isDynamic {
+                content
+                    .glassEffect(.clear.tint(Color.black.opacity(0.3)).interactive(), in: .rect(cornerRadius: 14))
+            } else {
+                content
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 14))
+                    .environment(\.colorScheme, isLight ? .light : .dark)
+                    .id(isLight)
+            }
+        } else {
+            content
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+        }
+    }
+}
+
+// MARK: - Glass Circle Modifier
+private struct GlassCircleModifier: ViewModifier {
+    let isLight: Bool
+    let isDynamic: Bool
+    var size: CGFloat = 44
+    
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if isDynamic {
+                content
+                    .frame(width: size, height: size)
+                    .glassEffect(.clear.tint(Color.black.opacity(isLight ? 0.25 : 0.5)).interactive(), in: .circle)
+            } else {
+                content
+                    .frame(width: size, height: size)
+                    .glassEffect(.regular.interactive(), in: .circle)
+                    .environment(\.colorScheme, isLight ? .light : .dark)
+                    .id(isLight)
+            }
+        } else {
+            content
+                .frame(width: size, height: size)
+                .background(Circle().fill(.ultraThinMaterial))
+        }
+    }
+}
+
+// MARK: - Glass Capsule Modifier
+private struct GlassCapsuleModifier: ViewModifier {
+    let isLight: Bool
+    let isDynamic: Bool
+    
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if isDynamic {
+                content
+                    .glassEffect(.clear.tint(Color.black.opacity(isLight ? 0.25 : 0.5)).interactive(), in: .capsule)
+            } else {
+                content
+                    .glassEffect(.regular.interactive(), in: .capsule)
+                    .environment(\.colorScheme, isLight ? .light : .dark)
+                    .id(isLight)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - Glass Effect Modifier
+private struct GlassEffectModifier: ViewModifier {
+    let isLight: Bool
+    
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+                .environment(\.colorScheme, isLight ? .light : .dark)
+                .id(isLight)
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - Collapsed Pill Glass Modifier
+private struct CollapsedPillGlassModifier: ViewModifier {
+    let isLight: Bool
+    let isDynamic: Bool
+    
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if isDynamic {
+                content
+                    .glassEffect(.clear.tint(Color.black.opacity(isLight ? 0.25 : 0.5)).interactive(), in: .capsule)
+            } else {
+                content
+                    .glassEffect(.regular.interactive(), in: .capsule)
+                    .environment(\.colorScheme, isLight ? .light : .dark)
+                    .id(isLight)
+            }
+        } else {
+            content
+                .background(Capsule().fill(.ultraThinMaterial))
+        }
     }
 }
 
 
+// MARK: - Playback Card Glass Modifier
+private struct PlaybackCardGlassModifier: ViewModifier {
+    let isLight: Bool
+    let isDynamic: Bool
+    
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            if isDynamic {
+                content
+                    .glassEffect(.clear.tint(Color.black.opacity(isLight ? 0.25 : 0.5)).interactive(), in: .rect(cornerRadius: 24))
+            } else {
+                content
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24))
+                    .environment(\.colorScheme, isLight ? .light : .dark)
+                    .id(isLight)
+            }
+        } else {
+            content
+                .background(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+        }
+    }
+}
 
+// MARK: - UIImage Dominant Color
+extension UIImage {
+    func dominantColor() -> UIColor? {
+        guard let cgImage = self.cgImage else { return nil }
+        
+        // Sample a small version for speed
+        let size = CGSize(width: 40, height: 40)
+        UIGraphicsBeginImageContext(size)
+        draw(in: CGRect(origin: .zero, size: size))
+        let resized = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        
+        guard let resizedCG = resized?.cgImage,
+              let dataProvider = resizedCG.dataProvider,
+              let data = dataProvider.data,
+              let bytes = CFDataGetBytePtr(data) else { return nil }
+        
+        let bytesPerPixel = resizedCG.bitsPerPixel / 8
+        let width = resizedCG.width
+        let height = resizedCG.height
+        
+        var colorCounts: [String: (count: Int, r: CGFloat, g: CGFloat, b: CGFloat)] = [:]
+        
+        for y in 0..<height {
+                    for x in 0..<width {
+                        let offset = (y * resizedCG.bytesPerRow) + (x * bytesPerPixel)
+                        // iOS CGContext uses BGRA byte order, not RGBA
+                        let b = CGFloat(bytes[offset]) / 255
+                        let g = CGFloat(bytes[offset + 1]) / 255
+                        let r = CGFloat(bytes[offset + 2]) / 255
+                
+                // Skip near-white and near-black
+                let brightness = (r + g + b) / 3
+                guard brightness > 0.15 && brightness < 0.92 else { continue }
+                
+                // Quantize to reduce noise (bucket into 32 levels)
+                let qr = Int(r * 8) * 32
+                let qg = Int(g * 8) * 32
+                let qb = Int(b * 8) * 32
+                let key = "\(qr)-\(qg)-\(qb)"
+                
+                if let existing = colorCounts[key] {
+                    colorCounts[key] = (existing.count + 1, existing.r + r, existing.g + g, existing.b + b)
+                } else {
+                    colorCounts[key] = (1, r, g, b)
+                }
+            }
+        }
+        
+        // Find most frequent color bucket
+        guard let dominant = colorCounts.max(by: { $0.value.count < $1.value.count }) else { return nil }
+        let count = CGFloat(dominant.value.count)
+        let avgR = dominant.value.r / count
+        let avgG = dominant.value.g / count
+        let avgB = dominant.value.b / count
+        
+        // Boost saturation to make it pop like Spotify does
+        var h: CGFloat = 0, s: CGFloat = 0, br: CGFloat = 0, a: CGFloat = 0
+        UIColor(red: avgR, green: avgG, blue: avgB, alpha: 1).getHue(&h, saturation: &s, brightness: &br, alpha: &a)
+        
+        // Spotify-style: push saturation up, clamp brightness to mid range
+        let boostedS = min(s * 1.4, 1.0)
+        let clampedBr = min(max(br, 0.35), 0.75)
+        
+        return UIColor(hue: h, saturation: boostedS, brightness: clampedBr, alpha: 1)
+    }
+}
+// MARK: - Chapter Row Glass Modifier
+private struct ChapterRowGlassModifier: ViewModifier {
+    let isSelected: Bool
+    
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(
+                    isSelected ? .regular.interactive().tint(.blue.opacity(0.25)) : .regular.interactive(),
+                    in: .rect(cornerRadius: 10)
+                )
+        } else {
+            content
+                .background(isSelected ? Color.blue.opacity(0.15) : Color.clear)
+                .cornerRadius(10)
+        }
+    }
+}

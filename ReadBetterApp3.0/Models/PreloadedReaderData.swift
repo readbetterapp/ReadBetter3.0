@@ -7,6 +7,7 @@
 
 import Foundation
 import AVFoundation
+import SwiftUI
 
 struct PreloadedReaderData {
     let book: Book
@@ -20,18 +21,24 @@ struct PreloadedReaderData {
     let audioDuration: Double?
     
     // OPTIMIZATION: Preloaded asset to avoid duplicate loading
-    let audioAsset: AVURLAsset?
-    
-    init(book: Book, chapter: Chapter, audioURL: URL, indexedWords: [IndexedWord], sentences: [PrecomputedSentence], totalWords: Int, audioDuration: Double? = nil, audioAsset: AVURLAsset? = nil) {
-        self.book = book
-        self.chapter = chapter
-        self.audioURL = audioURL
-        self.indexedWords = indexedWords
-        self.sentences = sentences
-        self.totalWords = totalWords
-        self.audioDuration = audioDuration
-        self.audioAsset = audioAsset
-    }
+        let audioAsset: AVURLAsset?
+        
+        // Preloaded cover image and dominant color for instant rendering
+        let coverImage: UIImage?
+        let coverDominantColor: Color?
+        
+        init(book: Book, chapter: Chapter, audioURL: URL, indexedWords: [IndexedWord], sentences: [PrecomputedSentence], totalWords: Int, audioDuration: Double? = nil, audioAsset: AVURLAsset? = nil, coverImage: UIImage? = nil, coverDominantColor: Color? = nil) {
+            self.book = book
+            self.chapter = chapter
+            self.audioURL = audioURL
+            self.indexedWords = indexedWords
+            self.sentences = sentences
+            self.totalWords = totalWords
+            self.audioDuration = audioDuration
+            self.audioAsset = audioAsset
+            self.coverImage = coverImage
+            self.coverDominantColor = coverDominantColor
+        }
 }
 
 // Loading state for the reader
