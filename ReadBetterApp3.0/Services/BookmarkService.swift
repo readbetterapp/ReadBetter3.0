@@ -125,7 +125,9 @@ final class BookmarkService: ObservableObject {
         let docRef = bookmarksRef(uid: uid).document(id)
         
         if isBookmarked(bookmarkId: id) {
-            try await docRef.delete()
+            // Fire-and-forget: don't await server ack so the UI never blocks offline.
+            // Firestore persistence queues the delete locally and syncs when back online.
+            Task { try? await docRef.delete() }
             return false
         } else {
             let b = Bookmark(
@@ -140,7 +142,9 @@ final class BookmarkService: ObservableObject {
                 folderIds: [],
                 starred: false
             )
-            try await docRef.setData(b.asFirestoreData(creating: true), merge: true)
+            // Fire-and-forget: returns immediately regardless of network state.
+            // Firestore persistence queues the write locally and syncs when back online.
+            Task { try? await docRef.setData(b.asFirestoreData(creating: true), merge: true) }
             return true
         }
     }

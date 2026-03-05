@@ -254,16 +254,151 @@ struct OptimizedReaderView: View {
         enum Kind {
             case saved
             case removed
+            case queued(count: Int)  // offline — write is queued locally
         }
-        
+
         let id = UUID()
         let kind: Kind
         let timeText: String
+        let sentenceIndex: Int
+
+        /// `true` only for the `.saved` case (not queued)
+        var isSaved: Bool { if case .saved = kind { return true }; return false }
+        /// Returns the queue count if this is a `.queued` toast, otherwise `nil`
+        var queueCount: Int? { if case .queued(let n) = kind { return n }; return nil }
     }
-    
-    @StateObject private var karaokeEngine = KaraokeEngine()
+
+    // MARK: - Dynamic Island Bookmark Toast
+    private struct DynamicIslandBookmarkToast: View {
+        let toast: BookmarkToast
+        let onAddNote: () -> Void
+
+        @State private var expanded = false
+        @State private var showContent = false
+        @State private var showNotePrompt = false
+
+        private let islandWidth: CGFloat = 126
+        private let islandHeight: CGFloat = 37
+        private let expandedWidth: CGFloat = 270
+        private let expandedHeight: CGFloat = 72
+
+        private var islandTop: CGFloat {
+            (UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first?.windows
+                .first?.safeAreaInsets.top ?? 59) - 4
+        }
+
+        var body: some View {
+            VStack(spacing: 0) {
+                // ── Main pill (same as before, original size) ──
+                ZStack(alignment: .top) {
+                    Capsule()
+                        .fill(Color.black)
+                        .frame(
+                            width: expanded ? expandedWidth : islandWidth,
+                            height: expanded ? expandedHeight : islandHeight
+                        )
+                        .shadow(color: .black.opacity(0.4), radius: 14, x: 0, y: 6)
+
+                    if showContent {
+                        HStack(spacing: 10) {
+                            Image(systemName: toast.queueCount != nil || toast.isSaved ? "bookmark.fill" : "bookmark.slash")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(
+                                    toast.queueCount != nil ? .orange :
+                                    toast.isSaved ? .yellow : .white.opacity(0.6)
+                                )
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                if let count = toast.queueCount {
+                                    Text(count == 1 ? "Bookmark queued" : "\(count) bookmarks queued")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white)
+                                    Text("Syncs when back online")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.55))
+                                } else {
+                                    Text(toast.isSaved ? "Bookmark saved" : "Bookmark removed")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white)
+                                    Text("at \(toast.timeText)")
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.white.opacity(0.55))
+                                }
+                            }
+
+                            Spacer()
+
+                            if toast.isSaved {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 20, weight: .medium))
+                                    .foregroundColor(.green)
+                            } else if toast.queueCount != nil {
+                                Image(systemName: "wifi.exclamationmark")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(.orange.opacity(0.85))
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(width: expandedWidth, height: expandedHeight)
+                        .transition(.opacity)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .animation(.spring(response: 0.45, dampingFraction: 0.72), value: expanded)
+
+                // ── Note prompt pill — appears below after short delay ──
+                if showNotePrompt && toast.isSaved {
+                    Button(action: onAddNote) {
+                        HStack(spacing: 7) {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.white.opacity(0.6))
+                            Text("Tap to add a note")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.white.opacity(0.6))
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule()
+                                .fill(Color.black.opacity(0.85))
+                        )
+                    }
+                    .padding(.top, 6)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
+                }
+
+                Spacer()
+            }
+            .padding(.top, islandTop)
+            .ignoresSafeArea()
+            .onAppear {
+                // Expand main pill
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.72)) {
+                    expanded = true
+                }
+                // Fade in main content
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    withAnimation(.easeIn(duration: 0.18)) {
+                        showContent = true
+                    }
+                }
+                // Show note prompt after main pill settles
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        showNotePrompt = true
+                    }
+                }
+            }
+        }
+    }
+
+        @StateObject private var karaokeEngine = KaraokeEngine()
     // Use singleton for background playback - player persists beyond view lifecycle
     @ObservedObject private var audioPlayer = OptimizedAudioPlayer.shared
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
     
     @State private var currentSentenceIndex: Int = 0
     @State private var displayLink: CADisplayLink?
@@ -358,6 +493,7 @@ struct OptimizedReaderView: View {
     @State private var bookmarkToastTask: Task<Void, Never>? = nil
     @State private var chapterBookmarksBySentenceIndex: [Int: Double] = [:]
     @State private var isBookmarkToggleInFlight: Bool = false
+    @State private var offlineBookmarkQueueCount: Int = 0
     @State private var sleepTimerEndDate: Date? = nil
     @State private var sleepTimerTask: Task<Void, Never>? = nil
     @State private var bookmarkJumpReturnTime: Double? = nil
@@ -886,12 +1022,7 @@ struct OptimizedReaderView: View {
                         // Keep Lock Screen / Control Center in sync.
                         // Now Playing updates are handled by the audio player internally
 
-                        // Throttled Live Activity progress update (manager handles rate limiting)
-                        ReadingActivityManager.shared.update(
-                            isPlaying: audioPlayer.isPlaying,
-                            currentTime: newValue,
-                            duration: audioPlayer.duration
-                        )
+
                     }
                 }
                 .onChange(of: audioPlayer.isPlaying) { oldValue, newValue in
@@ -987,39 +1118,31 @@ struct OptimizedReaderView: View {
                         .padding(.bottom, keyboardHeight)
                 }
                 .ignoresSafeArea(.keyboard)
+                .gesture(DragGesture(minimumDistance: 8).onChanged { _ in }.onEnded { _ in })
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .zIndex(999)
             }
             
-            // Center toast confirmation (non-blocking overlay)
+            // Dynamic Island-style expanding pill toast
             if let toast = bookmarkToast {
-                VStack(spacing: 10) {
-                    Image(systemName: toast.kind == .saved ? "bookmark.fill" : "bookmark.slash")
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundColor(readerColors.primary)
-                    
-                    Text(toast.kind == .saved ? "Bookmark saved" : "Bookmark removed")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(readerColors.text)
-                    
-                    Text("At \(toast.timeText)")
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundColor(readerColors.textSecondary)
+                DynamicIslandBookmarkToast(toast: toast) {
+                    // Tap to add note — dismiss toast then open glass note editor
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        bookmarkToast = nil
+                    }
+                    bookmarkToastTask?.cancel()
+                    let idx = toast.sentenceIndex
+                    guard idx >= 0, idx < preloadedData.sentences.count else { return }
+                    noteEditorSentenceIndex = idx
+                    noteEditorText = chapterNotesBySentenceIndex[idx] ?? ""
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.82)) {
+                        isNoteEditorPresented = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                        isNoteFieldFocused = true
+                    }
                 }
-                .padding(.vertical, 18)
-                .padding(.horizontal, 22)
-                .background(readerColors.card.opacity(isLightBackground ? 0.96 : 0.92))
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(readerColors.cardBorder, lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(themeManager.isDarkMode ? 0.35 : 0.18), radius: 14, x: 0, y: 8)
-                .frame(maxWidth: 280)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .transition(.opacity)
                 .zIndex(1000)
-                .allowsHitTesting(false)
             }
             
             // Explainable term overlay - shows context-specific explanations
@@ -1041,7 +1164,7 @@ struct OptimizedReaderView: View {
           
             // Inline Note Editor Overlay
             if isNoteEditorPresented {
-                // Dim backdrop — tap it to dismiss without saving
+                // Dim backdrop — tap to dismiss, drag blocked to prevent sheet dismiss
                 Color.black.opacity(isLightBackground ? 0.18 : 0.45)
                     .ignoresSafeArea()
                     .onTapGesture {
@@ -1050,6 +1173,7 @@ struct OptimizedReaderView: View {
                             isNoteEditorPresented = false
                         }
                     }
+                    .gesture(DragGesture(minimumDistance: 8).onChanged { _ in }.onEnded { _ in })
                     .zIndex(1002)
                 noteEditorOverlay
                     .zIndex(1003)
@@ -1250,30 +1374,26 @@ struct OptimizedReaderView: View {
             // Setup audio - either skip if already playing, or load fresh
             setupAudioOnAppear()
 
-            // Start / resume Live Activity for Dynamic Island
-            ReadingActivityManager.shared.startOrUpdate(
-                bookTitle: preloadedData.book.title,
-                bookId: preloadedData.book.id,
-                coverImage: preloadedData.coverImage,
-                chapterTitle: preloadedData.chapter.title,
-                chapterNumber: preloadedData.chapter.order + 1,
-                isPlaying: audioPlayer.isPlaying,
-                currentTime: audioPlayer.currentTime,
-                duration: audioPlayer.duration
-            )
 
-            // Track keyboard height for search bar positioning
+            // Track keyboard height — match system keyboard animation exactly
             NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main) { notification in
-                if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        keyboardHeight = frame.height
-                    }
+                guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+                let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+                let curveRaw = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int ?? 0
+                let curve = UIView.AnimationCurve(rawValue: curveRaw) ?? .easeInOut
+                let animator = UIViewPropertyAnimator(duration: duration, curve: curve) {
+                    keyboardHeight = frame.height
                 }
+                animator.startAnimation()
             }
-            NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { _ in
-                withAnimation(.easeOut(duration: 0.25)) {
+            NotificationCenter.default.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { notification in
+                let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+                let curveRaw = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int ?? 0
+                let curve = UIView.AnimationCurve(rawValue: curveRaw) ?? .easeInOut
+                let animator = UIViewPropertyAnimator(duration: duration, curve: curve) {
                     keyboardHeight = 0
                 }
+                animator.startAnimation()
             }
         }
         .onChange(of: playbackSpeed) { _, newValue in
@@ -1368,15 +1488,14 @@ struct OptimizedReaderView: View {
                 lastPlayingStateTime = nil
                 saveReadingProgress()
             }
-            // Keep Live Activity in sync with play/pause
-            ReadingActivityManager.shared.update(
-                isPlaying: isPlaying,
-                currentTime: audioPlayer.currentTime,
-                duration: audioPlayer.duration
-            )
+
         }
         .onReceive(bookmarkService.$bookmarks) { _ in
             Task { @MainActor in rebuildChapterBookmarkCache() }
+        }
+        .onChange(of: networkMonitor.isConnected) { _, isConnected in
+            // When connectivity is restored, queued bookmarks have synced — reset counter
+            if isConnected { offlineBookmarkQueueCount = 0 }
         }
         .sheet(isPresented: $isBookmarkEditorPresented) {
             BookmarkEditSheet(bookmarkId: bookmarkEditorId)
@@ -1394,7 +1513,7 @@ struct OptimizedReaderView: View {
             headerHideTask?.cancel()
             headerHideTask = nil
             karaokeEngine.reset()
-            ReadingActivityManager.shared.end()
+
         }
     }
     
@@ -1957,7 +2076,7 @@ struct OptimizedReaderView: View {
         } // end VStack
         
         .padding(.bottom, getSafeAreaBottom() + 8)
-                .interactiveDismissDisabled(isMenuExpanded || isNoteEditorPresented)
+                .interactiveDismissDisabled(isMenuExpanded || isNoteEditorPresented || isSearchActive || isBookmarkEditorPresented || isShareOverlayPresented || keyboardHeight > 0)
                 
                 .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isMenuExpanded)
         .overlay(alignment: .top) {
@@ -2000,7 +2119,12 @@ struct OptimizedReaderView: View {
                 }
                 .padding(.horizontal, 16)
             }
-            .offset(y: isSearchActive ? -80 : -50)
+            .offset(y: isSearchActive
+                ? UIScreen.main.bounds.height - keyboardHeight - 130
+                : -50
+            )
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSearchActive)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: keyboardHeight)
             GeometryReader { geo in
                 Color.clear
                     .preference(
@@ -2136,8 +2260,23 @@ struct OptimizedReaderView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(readerColors.card)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .background {
+                    if #available(iOS 26.0, *) {
+                        if usesDominantColorBackground {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .glassEffect(.clear.tint(Color.black.opacity(0.5)).interactive(), in: .rect(cornerRadius: 12))
+                        } else {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
+                                .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                        }
+                    } else {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 
                 // Match counter and navigation
                 if !searchMatches.isEmpty {
@@ -2153,8 +2292,19 @@ struct OptimizedReaderView: View {
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(readerColors.text)
                                 .frame(width: 32, height: 32)
-                                .background(readerColors.card)
-                                .clipShape(Circle())
+                                .background {
+                                    if #available(iOS 26.0, *) {
+                                        if usesDominantColorBackground {
+                                            Circle().glassEffect(.clear.tint(Color.black.opacity(0.5)).interactive(), in: .circle)
+                                        } else {
+                                            Circle().glassEffect(.regular.interactive(), in: .circle)
+                                                .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                                        }
+                                    } else {
+                                        Circle().fill(.ultraThinMaterial)
+                                            .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                                    }
+                                }
                         }
                         
                         // Next match button
@@ -2163,8 +2313,19 @@ struct OptimizedReaderView: View {
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(readerColors.text)
                                 .frame(width: 32, height: 32)
-                                .background(readerColors.card)
-                                .clipShape(Circle())
+                                .background {
+                                    if #available(iOS 26.0, *) {
+                                        if usesDominantColorBackground {
+                                            Circle().glassEffect(.clear.tint(Color.black.opacity(0.5)).interactive(), in: .circle)
+                                        } else {
+                                            Circle().glassEffect(.regular.interactive(), in: .circle)
+                                                .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                                        }
+                                    } else {
+                                        Circle().fill(.ultraThinMaterial)
+                                            .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                                    }
+                                }
                         }
                     }
                 }
@@ -2179,19 +2340,42 @@ struct OptimizedReaderView: View {
                         .font(.system(size: 16, weight: .medium))
                         .foregroundColor(readerColors.text)
                         .frame(width: 36, height: 36)
-                        .background(readerColors.card)
-                        .clipShape(Circle())
+                        .background {
+                            if #available(iOS 26.0, *) {
+                                if usesDominantColorBackground {
+                                    Circle().glassEffect(.clear.tint(Color.black.opacity(0.5)).interactive(), in: .circle)
+                                } else {
+                                    Circle().glassEffect(.regular.interactive(), in: .circle)
+                                        .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                                }
+                            } else {
+                                Circle().fill(.ultraThinMaterial)
+                                    .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                            }
+                        }
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(readerColors.background.opacity(0.95))
-            .overlay(
-                Rectangle()
-                    .frame(height: 1)
-                    .foregroundColor(readerColors.cardBorder),
-                alignment: .top
-            )
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background {
+                if #available(iOS 26.0, *) {
+                    if usesDominantColorBackground {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .glassEffect(.clear.tint(Color.black.opacity(0.5)).interactive(), in: .rect(cornerRadius: 20))
+                    } else {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+                            .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                    }
+                } else {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .environment(\.colorScheme, isLightBackground ? .light : .dark)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
         }
     }
     
@@ -2312,7 +2496,14 @@ struct OptimizedReaderView: View {
             }
             
             triggerBookmarkHaptic()
-            presentBookmarkToast(saved: didSave, startTime: sentence.startTime)
+            let isOffline = !NetworkMonitor.shared.isConnected
+            if didSave && isOffline { offlineBookmarkQueueCount += 1 }
+            presentBookmarkToast(
+                saved: didSave,
+                startTime: sentence.startTime,
+                sentenceIndex: sentenceIndex,
+                offlineQueueCount: (didSave && isOffline) ? offlineBookmarkQueueCount : nil
+            )
         } catch {
             bookmarkService.lastErrorMessage = "Bookmark failed: \(error.localizedDescription)"
         }
@@ -2324,31 +2515,29 @@ struct OptimizedReaderView: View {
         generator.prepare()
         generator.impactOccurred()
     }
-    
+
     @MainActor
-    private func presentBookmarkToast(saved: Bool, startTime: Double) {
+    private func presentBookmarkToast(saved: Bool, startTime: Double, sentenceIndex: Int, offlineQueueCount: Int? = nil) {
         bookmarkToastTask?.cancel()
         let timeText = PlaybackTimeFormatter.string(from: startTime)
 
-        withAnimation(.easeInOut(duration: 0.18)) {
-            bookmarkToast = BookmarkToast(
-                kind: saved ? .saved : .removed,
-                timeText: timeText
-            )
+        let kind: BookmarkToast.Kind
+        if let count = offlineQueueCount {
+            kind = .queued(count: count)
+        } else {
+            kind = saved ? .saved : .removed
         }
 
-        // Push bookmark event to Dynamic Island
-        if saved {
-            ReadingActivityManager.shared.bookmark(
+        withAnimation(.easeInOut(duration: 0.18)) {
+            bookmarkToast = BookmarkToast(
+                kind: kind,
                 timeText: timeText,
-                currentTime: audioPlayer.currentTime,
-                duration: audioPlayer.duration
+                sentenceIndex: sentenceIndex
             )
         }
-        
         bookmarkToastTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            withAnimation(.easeInOut(duration: 0.18)) {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                 bookmarkToast = nil
             }
         }
@@ -5370,6 +5559,7 @@ private struct NoteEditorCard: View {
                 .padding(.bottom, keyboardHeight > 0 ? 12 : max(safeBottom, 20))
             }
             .padding(.bottom, keyboardHeight > 0 ? keyboardHeight : 0)
+            .animation(.default, value: keyboardHeight)
             .background {
                 if #available(iOS 26.0, *) {
                     if usesDominantColorBackground {
