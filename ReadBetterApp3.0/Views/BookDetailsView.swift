@@ -16,6 +16,7 @@ struct BookDetailsView: View {
     @StateObject private var bookService = BookService.shared
     @StateObject private var ownershipService = BookOwnershipService.shared
     @ObservedObject private var downloadManager = DownloadManager.shared
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
 
     let bookId: String
     @State private var book: Book?
@@ -23,6 +24,19 @@ struct BookDetailsView: View {
     @State private var isLoading = true
     @State private var showUnlockModal = false
     @State private var showLoginPrompt = false
+
+    // Cellular download alert
+    private enum DownloadAlert: Identifiable {
+        case cellularConfirmation(Book)  // ask before using mobile data
+        case wifiOnlyBlocked             // user has WiFi-only enabled
+        var id: String {
+            switch self {
+            case .cellularConfirmation: return "cellular"
+            case .wifiOnlyBlocked: return "wifiOnly"
+            }
+        }
+    }
+    @State private var downloadAlert: DownloadAlert? = nil
     
     var body: some View {
         ZStack {
@@ -110,6 +124,26 @@ struct BookDetailsView: View {
         }
         .task {
             await loadBook()
+        }
+        // Cellular download alert — shown before starting any download on mobile data
+        .alert(item: $downloadAlert) { alert in
+            switch alert {
+            case .cellularConfirmation(let book):
+                return Alert(
+                    title: Text("Download on Cellular Data?"),
+                    message: Text("Audiobooks can use a lot of mobile data. You can limit downloads to WiFi only in Profile → Downloads."),
+                    primaryButton: .default(Text("Download Anyway")) {
+                        downloadManager.downloadBook(book)
+                    },
+                    secondaryButton: .cancel(Text("Cancel"))
+                )
+            case .wifiOnlyBlocked:
+                return Alert(
+                    title: Text("WiFi Only"),
+                    message: Text("You've set downloads to WiFi only. Connect to WiFi or turn off this setting in Profile → Downloads."),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
         }
         .overlay {
             if showUnlockModal, let book = book {
@@ -388,7 +422,7 @@ struct BookDetailsView: View {
         } else if status == .failed {
             // Failed state — retry
             Button(action: {
-                downloadManager.downloadBook(book)
+                initiateDownload(book)
             }) {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise.circle.fill")
@@ -409,7 +443,7 @@ struct BookDetailsView: View {
         } else {
             // Not downloaded
             Button(action: {
-                downloadManager.downloadBook(book)
+                initiateDownload(book)
             }) {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.down.circle")
@@ -694,6 +728,22 @@ struct BookDetailsView: View {
         }
     }
     
+    // MARK: - Download Initiation
+
+    /// Checks network type before starting a download.
+    /// - On WiFi: starts immediately.
+    /// - On cellular + WiFi-only enabled: shows "WiFi only" info alert.
+    /// - On cellular + WiFi-only disabled: shows cellular confirmation alert.
+    private func initiateDownload(_ book: Book) {
+        if networkMonitor.isOnWiFi {
+            downloadManager.downloadBook(book)
+        } else if downloadManager.wifiOnlyDownloads {
+            downloadAlert = .wifiOnlyBlocked
+        } else {
+            downloadAlert = .cellularConfirmation(book)
+        }
+    }
+
     // MARK: - Load Book
     private func loadBook() async {
         isLoading = true

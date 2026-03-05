@@ -16,6 +16,9 @@ final class NetworkMonitor: ObservableObject {
     /// `true` when the device has a usable network path (WiFi, cellular, etc.)
     @Published private(set) var isConnected: Bool = true
 
+    /// `true` only when connected via WiFi (not cellular/hotspot)
+    @Published private(set) var isOnWiFi: Bool = true
+
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "com.readbetter.network", qos: .background)
 
@@ -23,6 +26,7 @@ final class NetworkMonitor: ObservableObject {
         monitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 self?.isConnected = path.status == .satisfied
+                self?.isOnWiFi = path.usesInterfaceType(.wifi)
             }
         }
         monitor.start(queue: queue)

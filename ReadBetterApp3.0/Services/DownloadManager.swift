@@ -131,6 +131,11 @@ class DownloadManager: ObservableObject {
     @Published var manifest: DownloadManifest = DownloadManifest()
     @Published var activeDownloads: [String: BookDownloadProgress] = [:]
 
+    /// When `true`, downloads are only allowed over WiFi. Backed by UserDefaults.
+    @Published var wifiOnlyDownloads: Bool {
+        didSet { UserDefaults.standard.set(wifiOnlyDownloads, forKey: "com.readbetter.wifiOnlyDownloads") }
+    }
+
     private let downloadsDirectory: URL
     private let manifestURL: URL
     private let sessionDelegate = DownloadSessionDelegate()
@@ -145,6 +150,7 @@ class DownloadManager: ObservableObject {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         downloadsDirectory = docs.appendingPathComponent("Downloads", isDirectory: true)
         manifestURL = downloadsDirectory.appendingPathComponent("manifest.json")
+        wifiOnlyDownloads = UserDefaults.standard.bool(forKey: "com.readbetter.wifiOnlyDownloads")
 
         try? FileManager.default.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
 
@@ -163,6 +169,18 @@ class DownloadManager: ObservableObject {
         // Create book directory
         let bookDir = downloadsDirectory.appendingPathComponent(book.id, isDirectory: true)
         try? FileManager.default.createDirectory(at: bookDir, withIntermediateDirectories: true)
+
+        // Persist the cover art so it's available offline even after Kingfisher's cache expires
+        if let coverUrlString = book.coverUrl, let coverURL = URL(string: coverUrlString) {
+            let coverFileURL = bookDir.appendingPathComponent("cover.jpg")
+            if !FileManager.default.fileExists(atPath: coverFileURL.path) {
+                Task.detached(priority: .utility) {
+                    if let data = try? Data(contentsOf: coverURL) {
+                        try? data.write(to: coverFileURL, options: .atomic)
+                    }
+                }
+            }
+        }
 
         // Build chapter records
         var chapterRecords: [String: ChapterDownloadRecord] = [:]
@@ -307,6 +325,16 @@ class DownloadManager: ObservableObject {
         }
 
         return fileURL
+    }
+
+    /// Returns the locally-saved cover image URL for a downloaded book.
+    /// This file persists indefinitely (unlike Kingfisher's 7-day disk cache),
+    /// so covers stay visible even after long periods offline.
+    func localCoverURL(bookId: String) -> URL? {
+        let fileURL = downloadsDirectory
+            .appendingPathComponent(bookId)
+            .appendingPathComponent("cover.jpg")
+        return FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : nil
     }
 
     func totalStorageUsed() -> Int64 {

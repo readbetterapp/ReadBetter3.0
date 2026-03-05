@@ -17,7 +17,8 @@ struct ProfileView: View {
     @State private var isLoadingStats = false
     @State private var isEditingName = false
     @State private var editedName: String = ""
-    
+    @ObservedObject private var downloadManager = DownloadManager.shared
+
     var body: some View {
         ZStack {
             themeManager.colors.background
@@ -64,7 +65,19 @@ struct ProfileView: View {
                     VStack(spacing: 24) {
                         // Profile Card
                         profileCard
-                        
+
+                        // Downloads Section
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Downloads")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(themeManager.colors.textSecondary)
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+                                .padding(.horizontal, 4)
+
+                            downloadsSection
+                        }
+
                         // Settings Section
                         settingsSection
                     }
@@ -293,6 +306,64 @@ struct ProfileView: View {
         )
     }
     
+    // MARK: - Downloads Section
+    private var downloadsSection: some View {
+        VStack(spacing: 0) {
+            // WiFi Only Toggle
+            HStack(spacing: 12) {
+                Image(systemName: "wifi")
+                    .font(.system(size: 20))
+                    .foregroundColor(themeManager.colors.text)
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Download on WiFi Only")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(themeManager.colors.text)
+                    Text("Prevent downloads over cellular data")
+                        .font(.system(size: 12))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                }
+
+                Spacer()
+
+                Toggle("", isOn: $downloadManager.wifiOnlyDownloads)
+                    .labelsHidden()
+                    .tint(themeManager.colors.primary)
+            }
+            .padding(16)
+
+            if downloadManager.totalStorageUsed() > 0 {
+                Divider()
+                    .background(themeManager.colors.divider)
+
+                HStack(spacing: 12) {
+                    Image(systemName: "internaldrive")
+                        .font(.system(size: 20))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                        .frame(width: 24)
+
+                    Text("Downloaded Books")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(themeManager.colors.text)
+
+                    Spacer()
+
+                    Text(downloadManager.storageUsedFormatted())
+                        .font(.system(size: 14))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                }
+                .padding(16)
+            }
+        }
+        .background(themeManager.colors.card)
+        .cornerRadius(16)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+        )
+    }
+
     private func settingsRow(icon: String, title: String, color: Color) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
