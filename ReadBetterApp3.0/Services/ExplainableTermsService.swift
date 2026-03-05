@@ -25,6 +25,13 @@ final class ExplainableTermsService {
     
     // In-memory cache: [chapterId: ChapterExplainableTerms]
     private var cache: [String: ChapterExplainableTerms] = [:]
+
+    // Base directory for locally cached terms files
+    // Terms are saved alongside audio/transcript: Documents/Downloads/{bookId}/terms_{chapterId}.json
+    private let downloadsDirectory: URL = {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return docs.appendingPathComponent("Downloads", isDirectory: true)
+    }()
     
     // Word index lookup cache: [chapterId: [wordIndex: ExplainableTerm]]
     // This is built at runtime by matching term TEXT against indexedWords
@@ -45,41 +52,60 @@ final class ExplainableTermsService {
     /// If terms don't exist, triggers Cloud Function to process them in background
     @MainActor
     func getTerms(for bookId: String, chapterId: String) async -> ChapterExplainableTerms {
-        // Check cache first
+        // 1. Check in-memory cache first (fastest)
         if let cached = cacheQueue.sync(execute: { cache[chapterId] }) {
             return cached
         }
-        
-        // Fetch from Firestore
+
+        // 2. Check disk cache — works fully offline for downloaded books
+        if let diskTerms = loadTermsFromDisk(bookId: bookId, chapterId: chapterId) {
+            cacheQueue.sync { cache[chapterId] = diskTerms }
+            logger.info("📚 Loaded \(diskTerms.terms.count) terms from disk for \(chapterId)")
+            return diskTerms
+        }
+
+        // 3. Fetch from Firestore (requires network)
         do {
             let docRef = db.collection("explainableTerms")
                 .document(bookId)
                 .collection("chapters")
                 .document(chapterId)
-            
+
             let document = try await docRef.getDocument()
-            
+
             guard document.exists, let data = document.data() else {
                 logger.info("📚 No explainable terms found for \(chapterId) - triggering auto-processing")
-                // Trigger processing in background (fire-and-forget)
                 triggerProcessing(for: bookId, chapterId: chapterId)
                 return .empty
             }
-            
+
             let terms = parseTermsFromFirestore(data)
-            
-            // Cache the terms (but NOT the word index lookup - that's built per-chapter with indexedWords)
-            cacheQueue.sync {
-                cache[chapterId] = terms
-            }
-            
+            cacheQueue.sync { cache[chapterId] = terms }
+
+            // Opportunistically save to disk so this chapter works offline next time
+            saveTermsToDisk(terms, bookId: bookId, chapterId: chapterId)
+
             logger.info("📚 Loaded \(terms.terms.count) explainable terms for \(chapterId)")
             return terms
-            
+
         } catch {
             logger.error("❌ Error fetching explainable terms: \(error.localizedDescription)")
             return .empty
         }
+    }
+
+    /// Fetch and cache terms for all chapters of a book to disk.
+    /// Called during the book download phase so definitions work offline.
+    @MainActor
+    func cacheTermsForDownload(bookId: String, chapters: [Chapter]) async {
+        logger.info("📚 Caching explainable terms for \(chapters.count) chapters of '\(bookId)'")
+        for chapter in chapters {
+            let fileURL = localTermsURL(bookId: bookId, chapterId: chapter.id)
+            // Skip if already cached on disk
+            guard !FileManager.default.fileExists(atPath: fileURL.path) else { continue }
+            _ = await getTerms(for: bookId, chapterId: chapter.id)
+        }
+        logger.info("✅ Terms caching complete for '\(bookId)'"  )
     }
     
     /// Build word index lookup by matching term TEXT against the chapter's indexed words
@@ -204,7 +230,36 @@ final class ExplainableTermsService {
     }
     
     // MARK: - Private Helpers
-    
+
+    /// Returns the on-disk URL for a chapter's terms file.
+    /// Lives alongside audio/transcript: Documents/Downloads/{bookId}/terms_{chapterId}.json
+    private func localTermsURL(bookId: String, chapterId: String) -> URL {
+        downloadsDirectory
+            .appendingPathComponent(bookId, isDirectory: true)
+            .appendingPathComponent("terms_\(chapterId).json")
+    }
+
+    private func loadTermsFromDisk(bookId: String, chapterId: String) -> ChapterExplainableTerms? {
+        let url = localTermsURL(bookId: bookId, chapterId: chapterId)
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let terms = try? JSONDecoder().decode(ChapterExplainableTerms.self, from: data) else {
+            return nil
+        }
+        return terms
+    }
+
+    /// Saves terms to disk only when the book's download directory already exists,
+    /// so we never create stray folders for books that haven't been downloaded.
+    private func saveTermsToDisk(_ terms: ChapterExplainableTerms, bookId: String, chapterId: String) {
+        let url = localTermsURL(bookId: bookId, chapterId: chapterId)
+        let bookDir = url.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: bookDir.path) else { return }
+        guard let data = try? JSONEncoder().encode(terms) else { return }
+        try? data.write(to: url, options: .atomic)
+        logger.info("💾 Saved terms to disk for \(chapterId) (\(data.count) bytes)")
+    }
+
     private func parseTermsFromFirestore(_ data: [String: Any]) -> ChapterExplainableTerms {
         let chapterId = data["chapterId"] as? String ?? ""
         let bookId = data["bookId"] as? String ?? ""

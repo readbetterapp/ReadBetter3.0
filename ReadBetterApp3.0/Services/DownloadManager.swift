@@ -219,6 +219,15 @@ class DownloadManager: ObservableObject {
         }
 
         print("📥 DownloadManager: Started downloading '\(book.title)' (\(chapters.count) chapters, \(totalFiles) files)")
+
+        // Also cache explainable terms for offline word definitions.
+        // This is a lightweight Firestore fetch (JSON only, ~20-50KB per chapter),
+        // completely separate from the URLSession audio/transcript downloads.
+        let bookId = book.id
+        let chaptersSnapshot = chapters
+        Task { @MainActor in
+            await ExplainableTermsService.shared.cacheTermsForDownload(bookId: bookId, chapters: chaptersSnapshot)
+        }
     }
 
     func cancelDownload(bookId: String) {

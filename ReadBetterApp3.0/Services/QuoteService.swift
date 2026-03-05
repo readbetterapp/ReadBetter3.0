@@ -54,13 +54,11 @@ final class QuoteService: ObservableObject {
             print("📖 QuoteService: Using cached quote from today (cached date: \(cachedQuote.date))")
             return
         }
-        
-        // Clear old cache if it exists but is invalid
-        if currentQuote != nil {
-            print("📖 QuoteService: Cache expired, clearing old quote")
-            clearCache()
-        }
-        
+
+        // Note: intentionally do NOT clear the stale quote here.
+        // The old quote stays visible on screen while we fetch a fresh one,
+        // and remains visible if the fetch fails (e.g. offline).
+        // The new quote replaces it only on success.
         isLoading = true
         lastError = nil
         
