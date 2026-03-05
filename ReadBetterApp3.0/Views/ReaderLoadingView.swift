@@ -318,15 +318,30 @@ struct ReaderLoadingView: View {
                 jsonUrl = chapter.jsonUrl
             }
             self.chapterTitle = chapter.title
-            
+
+            // Check for offline downloads — prefer local files over streaming
+            let effectiveAudioUrl: String
+            let effectiveJsonUrl: String
+
+            if !isDescription,
+               let localAudio = DownloadManager.shared.localAudioURL(bookId: bookId, chapterOrder: chapter.order),
+               let localJson = DownloadManager.shared.localTranscriptURL(bookId: bookId, chapterOrder: chapter.order) {
+                effectiveAudioUrl = localAudio.absoluteString
+                effectiveJsonUrl = localJson.absoluteString
+                print("📱 ReaderLoadingView: Using offline files for chapter \(chapter.order)")
+            } else {
+                effectiveAudioUrl = audioUrl
+                effectiveJsonUrl = jsonUrl
+            }
+
             // Step 2: Load transcript (direct from GCS, with caching)
             loadingState = .loadingTranscript
             print("📖 Loading \(isDescription ? "description" : "chapter"): \(chapter.title)")
-            print("   Audio URL: \(audioUrl)")
-            print("   JSON URL: \(jsonUrl)")
+            print("   Audio URL: \(effectiveAudioUrl)")
+            print("   JSON URL: \(effectiveJsonUrl)")
             // Direct download and parse (cached for instant subsequent loads)
             let transcriptData = try await TranscriptService.shared.loadTranscript(
-                from: jsonUrl,
+                from: effectiveJsonUrl,
                 bookId: bookId,
                 chapterId: chapter.id
             )
@@ -362,7 +377,7 @@ struct ReaderLoadingView: View {
             
             // Step 4: ACTUALLY PRELOAD AUDIO FILE (not just duration!)
             loadingState = .loadingAudio
-            guard let audioURL = URL(string: audioUrl) else {
+            guard let audioURL = URL(string: effectiveAudioUrl) else {
                 throw ReaderLoadingError.invalidAudioURL
             }
             

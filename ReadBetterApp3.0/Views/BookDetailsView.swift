@@ -15,7 +15,8 @@ struct BookDetailsView: View {
     @EnvironmentObject var authManager: AuthManager
     @StateObject private var bookService = BookService.shared
     @StateObject private var ownershipService = BookOwnershipService.shared
-    
+    @ObservedObject private var downloadManager = DownloadManager.shared
+
     let bookId: String
     @State private var book: Book?
     @State private var isDescriptionExpanded = false
@@ -325,8 +326,107 @@ struct BookDetailsView: View {
                         .clipShape(Capsule())
                     }
                 }
+
+                // Download for Offline button
+                if isOwned && hasChapters {
+                    downloadButton(for: book)
+                }
             }
             .padding(.horizontal, 32)
+        }
+    }
+
+    // MARK: - Download Button
+    @ViewBuilder
+    private func downloadButton(for book: Book) -> some View {
+        let status = downloadManager.downloadStatus(for: book.id)
+        let isDownloading = downloadManager.activeDownloads[book.id] != nil
+
+        if isDownloading, let progress = downloadManager.activeDownloads[book.id] {
+            // Downloading state — show progress
+            VStack(spacing: 8) {
+                ProgressView(value: progress.fractionComplete)
+                    .tint(themeManager.colors.primary)
+                HStack {
+                    Text("Downloading... \(Int(progress.fractionComplete * 100))%")
+                        .font(.system(size: 13))
+                        .foregroundColor(themeManager.colors.textSecondary)
+                    Spacer()
+                    Button("Cancel") {
+                        downloadManager.cancelDownload(bookId: book.id)
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.red)
+                }
+            }
+            .padding(.top, 4)
+        } else if status == .completed && downloadManager.isBookDownloaded(book.id) {
+            // Downloaded state
+            Button(action: {
+                downloadManager.deleteDownload(bookId: book.id)
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Downloaded")
+                        .font(.system(size: 16, weight: .semibold))
+                    Spacer()
+                    Image(systemName: "trash")
+                        .font(.system(size: 14))
+                        .foregroundColor(.red)
+                }
+                .foregroundColor(themeManager.colors.primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(themeManager.colors.card)
+                .overlay(
+                    Capsule()
+                        .strokeBorder(themeManager.colors.primary.opacity(0.3), lineWidth: 1)
+                )
+                .clipShape(Capsule())
+            }
+        } else if status == .failed {
+            // Failed state — retry
+            Button(action: {
+                downloadManager.downloadBook(book)
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Retry Download")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .foregroundColor(.orange)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(themeManager.colors.card)
+                .overlay(
+                    Capsule()
+                        .strokeBorder(Color.orange.opacity(0.3), lineWidth: 1)
+                )
+                .clipShape(Capsule())
+            }
+        } else {
+            // Not downloaded
+            Button(action: {
+                downloadManager.downloadBook(book)
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Download for Offline")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .foregroundColor(themeManager.colors.text)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(themeManager.colors.card)
+                .overlay(
+                    Capsule()
+                        .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                )
+                .clipShape(Capsule())
+            }
         }
     }
     

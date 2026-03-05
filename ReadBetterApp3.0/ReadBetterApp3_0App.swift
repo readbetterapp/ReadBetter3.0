@@ -12,20 +12,37 @@ import GoogleSignIn
 import Kingfisher
 
 class AppDelegate: NSObject, UIApplicationDelegate {
+    /// Stored completion handler for background URLSession downloads
+    var backgroundSessionCompletionHandler: (() -> Void)?
+
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
-        
+
         // CRITICAL: Configure audio session for background playback FIRST, before anything else.
         // This must happen early, before any AVPlayer is created.
         configureAudioSessionForBackgroundPlayback()
-        
+
         // Configure Firebase with the correct plist based on bundle ID
         configureFirebase()
-        
+
         // Configure Kingfisher image cache for optimal performance
         configureKingfisher()
-        
+
+        // Initialize DownloadManager early to reconnect background URLSession
+        // This ensures downloads that completed while the app was killed are properly handled
+        Task { @MainActor in
+            _ = DownloadManager.shared
+        }
+
         return true
+    }
+
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        if identifier == "com.readbetter.downloads" {
+            backgroundSessionCompletionHandler = completionHandler
+        }
     }
     
     private func configureFirebase() {

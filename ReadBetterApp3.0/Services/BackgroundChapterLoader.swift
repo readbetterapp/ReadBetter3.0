@@ -53,23 +53,37 @@ class BackgroundChapterLoader {
             }
             
             print("✅ BackgroundChapterLoader: Found chapter '\(chapter.title)'")
-            
+
             guard !Task.isCancelled else { return }
-            
+
+            // Check for offline downloads — prefer local files over streaming
+            let effectiveAudioUrl: String
+            let effectiveJsonUrl: String
+
+            if let localAudio = await DownloadManager.shared.localAudioURL(bookId: bookId, chapterOrder: chapter.order),
+               let localJson = await DownloadManager.shared.localTranscriptURL(bookId: bookId, chapterOrder: chapter.order) {
+                effectiveAudioUrl = localAudio.absoluteString
+                effectiveJsonUrl = localJson.absoluteString
+                print("📱 BackgroundChapterLoader: Using offline files")
+            } else {
+                effectiveAudioUrl = chapter.audioUrl
+                effectiveJsonUrl = chapter.jsonUrl
+            }
+
             // Step 3: Load transcript
             let transcriptData = try await TranscriptService.shared.loadTranscript(
-                from: chapter.jsonUrl,
+                from: effectiveJsonUrl,
                 bookId: bookId,
                 chapterId: chapter.id
             )
-            
+
             guard !transcriptData.words.isEmpty else {
                 print("❌ BackgroundChapterLoader: Empty transcript")
                 return
             }
-            
+
             guard !Task.isCancelled else { return }
-            
+
             // Step 4: Build KaraokeEngine index (must be on MainActor)
             let engine = KaraokeEngine()
             await MainActor.run {
@@ -78,16 +92,16 @@ class BackgroundChapterLoader {
             let indexedWords = engine.getIndexedWords()
             let sentences = engine.getSentences()
             let totalWords = engine.getTotalWords()
-            
+
             guard !indexedWords.isEmpty, !sentences.isEmpty else {
                 print("❌ BackgroundChapterLoader: Empty index")
                 return
             }
-            
+
             guard !Task.isCancelled else { return }
-            
+
             // Step 5: Preload audio asset
-            guard let audioURL = URL(string: chapter.audioUrl) else {
+            guard let audioURL = URL(string: effectiveAudioUrl) else {
                 print("❌ BackgroundChapterLoader: Invalid audio URL")
                 return
             }
