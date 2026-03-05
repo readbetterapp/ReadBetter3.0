@@ -40,9 +40,22 @@ class TranscriptService {
             print("❌ TranscriptService: Invalid URL - \(urlString)")
             throw TranscriptError.invalidURL
         }
-        
+
+        // Fast path for local (offline) files — skip HTTP entirely
+        if url.isFileURL {
+            print("📱 TranscriptService: Loading transcript from local file: \(url.lastPathComponent)")
+            let data = try Data(contentsOf: url)
+            guard !data.isEmpty else {
+                throw TranscriptError.emptyFile(urlString)
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw TranscriptError.invalidJSON
+            }
+            return try parseTranscript(json: json)
+        }
+
         print("📥 TranscriptService: Loading transcript directly from GCS (NO CACHE): \(urlString)")
-        
+
         // Use noCacheSession instead of URLSession.shared to bypass HTTP cache
         let (data, response) = try await noCacheSession.data(from: url)
         

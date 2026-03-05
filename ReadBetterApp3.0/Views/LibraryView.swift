@@ -11,20 +11,26 @@ struct LibraryView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var ownershipService: BookOwnershipService
     @StateObject private var bookService = BookService.shared
+    @ObservedObject private var downloadManager = DownloadManager.shared
     @State private var activeFilter: FilterType = .all
-    
+
     enum FilterType: String, CaseIterable {
         case all = "All Books"
         case reading = "Currently Reading"
         case finished = "Finished"
+        case downloaded = "Downloaded"
     }
-    
+
     var filteredBooks: [Book] {
-        // Only show owned books
         let ownedBooks = bookService.books.filter { ownershipService.isBookOwned(bookId: $0.id) }
-        return ownedBooks
+        switch activeFilter {
+        case .downloaded:
+            return ownedBooks.filter { downloadManager.isBookDownloaded($0.id) }
+        default:
+            return ownedBooks
+        }
     }
-    
+
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0, pinnedViews: []) {
@@ -38,7 +44,7 @@ struct LibraryView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
                 .padding(.bottom, 20)
-                
+
                 // Filter buttons
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
@@ -53,11 +59,40 @@ struct LibraryView: View {
                     .padding(.horizontal, 16)
                 }
                 .padding(.bottom, 24)
-                
+
+                // Storage summary (shown when Downloaded filter is active)
+                if activeFilter == .downloaded {
+                    HStack(spacing: 8) {
+                        Image(systemName: "internaldrive.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(themeManager.colors.textSecondary)
+                        Text("Storage Used: \(downloadManager.storageUsedFormatted())")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(themeManager.colors.text)
+                        Spacer()
+                        if !downloadManager.manifest.books.filter({ $0.value.status == .completed }).isEmpty {
+                            Button("Delete All") {
+                                for bookId in downloadManager.manifest.books.keys {
+                                    downloadManager.deleteDownload(bookId: bookId)
+                                }
+                            }
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.red)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 16)
+                }
+
                 // Books Grid
                 if filteredBooks.isEmpty {
-                    EmptyLibraryView()
-                        .padding(.top, 60)
+                    if activeFilter == .downloaded {
+                        EmptyDownloadsView()
+                            .padding(.top, 60)
+                    } else {
+                        EmptyLibraryView()
+                            .padding(.top, 60)
+                    }
                 } else {
                     LazyVGrid(columns: [
                         GridItem(.flexible(), spacing: 16),
@@ -70,7 +105,7 @@ struct LibraryView: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 100)
                 }
-                
+
                 // Extra space for tab bar collapse
                 Spacer()
                     .frame(height: 1000)
@@ -80,11 +115,11 @@ struct LibraryView: View {
         .background {
             ZStack {
                 themeManager.colors.background
-                
+
                 // Bottom edge fade - sits behind content and tab bar
                 VStack {
                     Spacer()
-                    
+
                     LinearGradient(
                         stops: [
                             .init(color: Color.clear, location: 0.0),
@@ -113,7 +148,7 @@ struct FilterButton: View {
     let title: String
     let isActive: Bool
     let action: () -> Void
-    
+
     var body: some View {
         Button(action: action) {
             Text(title)
@@ -148,18 +183,59 @@ struct FilterButton: View {
 // MARK: - Empty Library View
 struct EmptyLibraryView: View {
     @EnvironmentObject var themeManager: ThemeManager
-    
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "books.vertical")
                 .font(.system(size: 60))
                 .foregroundColor(themeManager.colors.textSecondary)
-            
+
             Text("No Books in Your Library")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(themeManager.colors.text)
-            
+
             Text("Start exploring and add books to your collection")
+                .font(.system(size: 14))
+                .foregroundColor(themeManager.colors.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.vertical, 40)
+        .padding(.horizontal, 40)
+        .frame(maxWidth: .infinity)
+        .background {
+            if #available(iOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(Color.clear)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(themeManager.colors.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .strokeBorder(themeManager.colors.cardBorder, lineWidth: 1)
+                    )
+            }
+        }
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 8)
+        .padding(.horizontal, 16)
+    }
+}
+
+// MARK: - Empty Downloads View
+struct EmptyDownloadsView: View {
+    @EnvironmentObject var themeManager: ThemeManager
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 60))
+                .foregroundColor(themeManager.colors.textSecondary)
+
+            Text("No Downloaded Books")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(themeManager.colors.text)
+
+            Text("Download books from their detail page to read offline")
                 .font(.system(size: 14))
                 .foregroundColor(themeManager.colors.textSecondary)
                 .multilineTextAlignment(.center)
@@ -191,7 +267,7 @@ struct BookCard: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var router: AppRouter
     let book: Book
-    
+
     var body: some View {
         Button(action: {
             router.navigate(to: .bookDetails(bookId: book.id))
@@ -229,19 +305,33 @@ struct BookCard: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.3), radius: 4, x: 2, y: 3)
-                
+                    .overlay(alignment: .topTrailing) {
+                        // Download badge
+                        if DownloadManager.shared.isBookDownloaded(book.id) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.white)
+                                .background(
+                                    Circle()
+                                        .fill(themeManager.colors.primary)
+                                        .frame(width: 24, height: 24)
+                                )
+                                .padding(8)
+                        }
+                    }
+
                 // Title
                 Text(book.title)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(themeManager.colors.text)
                     .lineLimit(2)
-                
+
                 // Author
                 Text("by \(book.author)")
                     .font(.system(size: 12))
                     .foregroundColor(themeManager.colors.textSecondary)
                     .lineLimit(1)
-                
+
                 // Publisher/Date info
                 if let publisher = book.publisher {
                     Text(publisher)
