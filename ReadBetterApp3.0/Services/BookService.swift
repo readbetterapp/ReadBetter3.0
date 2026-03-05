@@ -27,13 +27,8 @@ class BookService: ObservableObject {
     @Published var isFetching = false // Track if fetch is in progress (prevents duplicate calls)
     
     private init() {
-        // Enable Firestore persistence (caches data locally)
-        let settings = FirestoreSettings()
-        // Note: Using deprecated API - Firebase will update this in future SDK versions
-        // These warnings are non-critical and don't prevent compilation
-        settings.isPersistenceEnabled = true
-        settings.cacheSizeBytes = 100 * 1024 * 1024 // 100MB cache
-        db.settings = settings
+        // Firestore offline persistence is configured globally in AppDelegate.configureFirebase()
+        // before any Firestore operations. No settings needed here.
     }
     
     /// Fetch all books using API (with fallback to Firestore)

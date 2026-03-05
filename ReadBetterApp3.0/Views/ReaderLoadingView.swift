@@ -445,17 +445,52 @@ struct ReaderLoadingView: View {
             print("   - Audio duration: \(duration) seconds")
             print("   - Explainable terms: preloading in background")
             
-            // Preload cover image + dominant color during loading screen
-                        var coverImage: UIImage? = nil
-                        var coverDominantColor: Color? = nil
-                        if let urlString = book.coverUrl, let url = URL(string: urlString),
-                           let data = try? Data(contentsOf: url),
-                           let image = UIImage(data: data) {
-                            coverImage = image
-                            if let dominant = image.dominantColor() {
-                                coverDominantColor = Color(dominant)
-                            }
-                        }
+            // Preload cover image + dominant color during loading screen.
+            // Strategy (works fully offline after first open):
+            //   1. UserDefaults cached RGBA  → instant, no image needed
+            //   2. Kingfisher disk cache     → image already fetched in Library/BookDetails
+            //   3. Network download          → first-time only, saves result to UserDefaults
+            var coverImage: UIImage? = nil
+            var coverDominantColor: Color? = nil
+
+            let colorCacheKey = "dominantColor_\(bookId)"
+
+            func loadCachedColor() -> Color? {
+                guard let components = UserDefaults.standard.array(forKey: colorCacheKey) as? [Double],
+                      components.count == 4 else { return nil }
+                return Color(UIColor(red: components[0], green: components[1],
+                                    blue: components[2], alpha: components[3]))
+            }
+
+            func saveColor(_ uiColor: UIColor) {
+                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+                UserDefaults.standard.set([Double(r), Double(g), Double(b), Double(a)],
+                                          forKey: colorCacheKey)
+            }
+
+            if let cached = loadCachedColor() {
+                // Fast path: colour already computed on a previous open
+                coverDominantColor = cached
+            } else if let urlString = book.coverUrl, let url = URL(string: urlString) {
+                // Try Kingfisher disk cache first (image likely already cached from Library/BookDetails)
+                var image: UIImage? = await withCheckedContinuation { continuation in
+                    ImageCache.default.retrieveImage(forKey: urlString) { result in
+                        continuation.resume(returning: (try? result.get())?.image)
+                    }
+                }
+                // Fall back to network only if not in cache (first-ever open)
+                if image == nil, let data = try? Data(contentsOf: url) {
+                    image = UIImage(data: data)
+                }
+                if let image {
+                    coverImage = image
+                    if let dominant = image.dominantColor() {
+                        coverDominantColor = Color(dominant)
+                        saveColor(dominant) // persist so next open works offline
+                    }
+                }
+            }
                         
                         // Create preloaded data with ALL indexed data + preloaded asset
                         let preloadedData = PreloadedReaderData(

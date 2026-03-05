@@ -7,6 +7,7 @@
 
 import SwiftUI
 import FirebaseCore
+import FirebaseFirestore
 import AVFoundation
 import GoogleSignIn
 import Kingfisher
@@ -66,6 +67,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         
         FirebaseApp.configure(options: options)
         print("✅ Firebase configured with \(plistName).plist for bundle: \(bundleID)")
+
+        // Enable Firestore offline persistence globally — covers bookmarks, reading progress,
+        // and all user data (not just books). Must be set immediately after FirebaseApp.configure,
+        // before any Firestore operations, so it applies to the shared singleton.
+        let firestoreSettings = FirestoreSettings()
+        firestoreSettings.isPersistenceEnabled = true
+        firestoreSettings.cacheSizeBytes = FirestoreCacheSizeUnlimited
+        Firestore.firestore().settings = firestoreSettings
+        print("✅ Firestore offline persistence enabled (unlimited cache)")
     }
 
     // Google Sign-In callback URL handler
